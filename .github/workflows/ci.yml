@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        # No LLM key in CI. The suite is designed for that: agent behaviour is
+        # covered by a scripted fake provider, and the pandas-vs-DuckDB
+        # cross-check runs against the committed real datasets.
+        run: pytest -q -p no:warnings --cov=core --cov=api --cov-report=term-missing
+
+      - name: Verify the real datasets are present and intact
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          retail = pd.read_csv("data/online_retail_ii_international.csv")
+          countries = pd.read_csv("data/world_bank_country_profile.csv")
+          assert len(retail) == 86_041, f"unexpected retail row count: {len(retail)}"
+          assert retail["Country"].nunique() == 42
+          assert len(countries) > 200
+          print(f"OK: {len(retail):,} real transaction rows, {len(countries)} country profiles")
+          PY
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t ai-data-analyst:ci .
+      - name: Boot the API and check /health
+        run: |
+          docker run -d --name api -p 8000:8000 ai-data-analyst:ci \
+            uvicorn api.main:app --host 0.0.0.0 --port 8000
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              curl -s http://localhost:8000/health; echo; exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become healthy"; docker logs api; exit 1
