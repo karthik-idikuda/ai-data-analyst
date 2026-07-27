@@ -15,9 +15,10 @@ source: [UCI Online Retail II](https://archive.ics.uci.edu/dataset/502/online+re
 [World Bank Open Data](https://data.worldbank.org). Nothing is generated,
 simulated or synthetic. Full provenance in [`data/README.md`](data/README.md).
 
-**Status:** 330 tests passing. Verified end-to-end against the live Gemini API on
-the real data — it returns EIRE / 615,519.55, matching the independently computed
-pandas ground truth.
+**Status:** 330 tests passing locally, 331 in the container. Docker image built and
+verified running — both services healthy, full suite and smoke test green inside it.
+Verified end-to-end against the live Gemini API on the real data: it returns
+EIRE / 615,519.55, matching the independently computed pandas ground truth.
 
 ---
 
@@ -38,7 +39,22 @@ With Docker:
 cp .env.example .env    # add your key
 docker compose up -d
 # UI  http://localhost:8501
-# API http://localhost:8000/docs
+# API http://localhost:8000/docs   (interactive OpenAPI docs)
+```
+
+Both services run the same 1.65 GB image as a non-root user (`analyst`, uid 10001)
+and report healthy through their own healthchecks. Verified inside the container,
+not just built:
+
+```
+docker compose ps          ui  Up (healthy)    api  Up (healthy)
+docker exec … pytest       331 passed
+docker exec … api_smoke    All checks passed
+POST /sessions/…/datasets  86,041 rows loaded, 78.6% join overlap detected
+POST /sessions/…/sql       EIRE 615,519.55 · Netherlands 548,524.95 · Germany 417,988.56
+POST  (DROP TABLE …)       HTTP 422 — guard held over HTTP
+GET  …/report?format=pdf   200, 4,294 bytes, starts with %PDF-
+GET  …/dashboard           measure = quantity * price, 6 KPIs, 3 panels
 ```
 
 Then upload `data/online_retail_ii_international.csv` and
