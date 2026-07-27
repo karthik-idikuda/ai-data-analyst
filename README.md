@@ -53,6 +53,49 @@ detection, forecasting, the auto dashboard and report export are all determinist
 and need no credentials. Only natural-language questions and narrated insights
 require a key, and the app says so plainly instead of failing.
 
+### Verify everything in one command
+
+```bash
+make api-smoke      # no API key needed
+```
+
+Exercises the whole deterministic surface end to end against the real files —
+upload, validation of a broken file, schema and semantic layer, guarded SQL,
+five injection attempts, anomalies, forecast, dashboard, insights, and all three
+export formats — and prints the real numbers so the output is checkable rather
+than a row of ticks. Sample output:
+
+```
+  ok   top country is EIRE  EIRE = 615,519.55
+  ok   matches pandas ground truth  expected ~615,519.55, got 615,519.55
+  ok   cross-file join ran  top region: Europe & Central Asia
+  ok   DROP rejected
+  ok   filesystem read rejected
+  ok   anomalies found  25 findings
+  ok   forecast produced  Holt-Winters exponential smoothing (period=12)
+  ok   error reported honestly  MAPE 60.18%
+  ok   dashboard built  6 KPIs, 3 panels
+  ok   excel export  9,480 bytes
+```
+
+---
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Landing](docs/screenshots/00-landing.png) | ![Uploaded](docs/screenshots/01-uploaded-suggestions.png) |
+| **Landing** — documents the real datasets and their sources | **After upload** — both real files profiled, quality scored, the country join detected at 79% value overlap, and starter questions generated from the columns actually present |
+| ![Answer and chart](docs/screenshots/02-chat-answer-chart.png) | ![Reasoning and SQL](docs/screenshots/03-reasoning-sql-trace.png) |
+| **Answer** — EIRE at 615,519.55 with the net-vs-returns caveat the model raised itself, plus the chart it specified | **"How I got this"** — the steps actually taken, the SQL that ran, and the execution trace with per-step latency, token counts and trace id |
+
+**Demo video:** [`docs/demo.mp4`](docs/demo.mp4) — _to record: 25 s, no narration.
+Upload both CSVs → ask "Which country generated the highest revenue?" → expand
+"How I got this" to show the SQL → open the Dashboard tab → ask for anomalies._
+
+**Live app:** _add your deployment URL here (Streamlit Community Cloud or a
+Hugging Face Space both host this for free)._
+
 ---
 
 ## What it does
