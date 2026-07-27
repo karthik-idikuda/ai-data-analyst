@@ -48,7 +48,7 @@ def test_health_reports_configuration() -> None:
     body = client.get("/health").json()
     assert body["status"] == "ok"
     assert "llm" in body and "configured" in body["llm"]
-    assert "run_sql" in body["tools"]
+    assert {"run_sql", "run_pandas", "create_chart", "detect_anomalies"} <= set(body["tools"])
     assert body["limits"]["max_result_rows"] > 0
 
 
@@ -227,7 +227,12 @@ def test_report_export_in_all_formats(loaded_session: str) -> None:
     assert xlsx.content[:2] == b"PK"
     assert "spreadsheetml" in xlsx.headers["content-type"]
 
-    assert client.get(f"/sessions/{loaded_session}/report?format=pdf").status_code == 400
+    pdf = client.get(f"/sessions/{loaded_session}/report?format=pdf")
+    assert pdf.status_code == 200
+    assert pdf.content[:5] == b"%PDF-"
+    assert pdf.headers["content-type"] == "application/pdf"
+
+    assert client.get(f"/sessions/{loaded_session}/report?format=docx").status_code == 400
 
 
 @requires_real_data

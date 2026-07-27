@@ -161,6 +161,215 @@ def to_markdown(session: DataSession, *, title: str = "AI Data Analyst — Sessi
     return "\n".join(parts)
 
 
+def to_pdf(session: DataSession, *, title: str = "AI Data Analyst — Session Report") -> bytes:
+    """Render the session as a paginated PDF.
+
+    Built with ReportLab's Platypus flowables rather than a headless browser, so the
+    container stays small and the export has no system dependencies. Content is the
+    same audit trail as the Markdown export: datasets, detected joins, every
+    question and answer, and every SQL statement that executed.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        PageBreak,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table as PdfTable,
+        TableStyle,
+    )
+    import io
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        title=title,
+        author="AI Data Analyst",
+        leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm,
+    )
+
+    base = getSampleStyleSheet()
+    styles = {
+        "title": ParagraphStyle("t", parent=base["Title"], fontSize=19, spaceAfter=4,
+                                textColor=colors.HexColor("#1e3a8a")),
+        "meta": ParagraphStyle("m", parent=base["Normal"], fontSize=8,
+                               textColor=colors.HexColor("#6b7280"), spaceAfter=10),
+        "h2": ParagraphStyle("h2", parent=base["Heading2"], fontSize=13, spaceBefore=12,
+                             spaceAfter=5, textColor=colors.HexColor("#1e40af")),
+        "h3": ParagraphStyle("h3", parent=base["Heading3"], fontSize=10.5, spaceBefore=8,
+                             spaceAfter=3),
+        "body": ParagraphStyle("b", parent=base["BodyText"], fontSize=9, leading=12.5,
+                               alignment=TA_LEFT),
+        "code": ParagraphStyle("c", parent=base["Code"], fontSize=7.4, leading=9.4,
+                               backColor=colors.HexColor("#f3f4f6"),
+                               borderPadding=4, spaceBefore=3, spaceAfter=6),
+    }
+
+    def para(text: str, style: str = "body") -> Paragraph:
+        return Paragraph(html.escape(str(text)), styles[style])
+
+    def code_block(text: str) -> Paragraph:
+        # Platypus needs <br/> for line breaks and no tabs.
+        safe = html.escape(str(text)).replace("\n", "<br/>").replace("  ", "&nbsp;&nbsp;")
+        return Paragraph(safe, styles["code"])
+
+    def grid(header: list[str], rows: list[list[Any]], widths: list[float] | None = None) -> PdfTable:
+        data = [[Paragraph(f"<b>{html.escape(str(h))}</b>", styles["body"]) for h in header]]
+        for row in rows:
+            data.append([
+                Paragraph(html.escape("" if v is None else str(v))[:300], styles["body"]) for v in row
+            ])
+        table = PdfTable(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5e7eb")),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+                     [colors.white, colors.HexColor("#f9fafb")]),
+                ]
+            )
+        )
+        return table
+
+    story: list[Any] = [
+        para(title, "title"),
+        para(
+            f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
+            f"session {session.session_id}",
+            "meta",
+        ),
+    ]
+
+    story.append(para("Datasets", "h2"))
+    if not session.datasets:
+        story.append(para("No datasets were loaded in this session."))
+    for dataset in session.datasets.values():
+        score = quality_score(dataset.profile)
+        story.append(para(f"{dataset.table}  (from {dataset.source_name})", "h3"))
+        story.append(
+            para(
+                f"{dataset.profile.row_count:,} rows · {dataset.profile.column_count} columns · "
+                f"quality {score['score']}/100 "
+                f"(completeness {score['completeness_pct']}%, uniqueness {score['uniqueness_pct']}%)"
+            )
+        )
+        story.append(Spacer(1, 3))
+        story.append(
+            grid(
+                ["column", "type", "role", "distinct", "null %"],
+                [
+                    [c.name, c.duckdb_type, c.role.value, f"{c.distinct_count:,}", f"{c.null_pct}%"]
+                    for c in dataset.profile.columns
+                ],
+                widths=[52 * mm, 24 * mm, 26 * mm, 24 * mm, 20 * mm],
+            )
+        )
+        warnings = [i for i in dataset.profile.issues if i.severity in ("warning", "error")]
+        if warnings:
+            story.append(Spacer(1, 4))
+            story.append(para("Data-quality flags:", "h3"))
+            for issue in warnings[:10]:
+                story.append(para(f"• {issue.message}"))
+
+    if session.join_hints:
+        story.append(para("Detected join keys", "h2"))
+        story.append(
+            grid(
+                ["left", "right", "value overlap"],
+                [
+                    [f"{h.left_table}.{h.left_column}", f"{h.right_table}.{h.right_column}",
+                     f"{h.overlap_pct}%"]
+                    for h in session.join_hints
+                ],
+            )
+        )
+
+    story.append(PageBreak())
+    story.append(para("Conversation", "h2"))
+    if not session.history:
+        story.append(para("No questions were asked in this session."))
+
+    turn = 0
+    for message in session.history:
+        if message.role == "user":
+            turn += 1
+            story.append(para(f"Q{turn}. {message.content}", "h3"))
+            continue
+
+        for line in message.content.split("\n"):
+            stripped = line.strip()
+            if stripped:
+                story.append(para(stripped.replace("**", "").replace("`", "")))
+
+        if message.reasoning:
+            story.append(Spacer(1, 3))
+            story.append(para("Reasoning", "h3"))
+            for i, step in enumerate(message.reasoning, start=1):
+                story.append(para(f"{i}. {step}"))
+
+        for artifact in message.artifacts:
+            payload = artifact.payload
+            if artifact.kind in ("table", "chart") and payload.get("columns"):
+                story.append(Spacer(1, 3))
+                story.append(para(artifact.title, "h3"))
+                story.append(grid(payload["columns"], payload.get("rows", [])[:20]))
+            elif artifact.kind == "anomaly":
+                items = payload.get("anomalies", [])[:12]
+                if items:
+                    story.append(Spacer(1, 3))
+                    story.append(para(f"{artifact.title} — {len(payload.get('anomalies', []))} findings", "h3"))
+                    story.append(
+                        grid(
+                            ["method", "column", "value", "why flagged"],
+                            [[a["method"], a["column"], a.get("value"), a["reason"]] for a in items],
+                            widths=[26 * mm, 24 * mm, 22 * mm, 100 * mm],
+                        )
+                    )
+            elif artifact.kind == "forecast":
+                points = payload.get("points", [])
+                if points:
+                    story.append(Spacer(1, 3))
+                    story.append(para(f"{artifact.title} — {payload.get('method')}", "h3"))
+                    story.append(
+                        grid(
+                            ["period", "forecast", "lower 95%", "upper 95%"],
+                            [[p["period"], f"{p['forecast']:,.2f}", f"{p['lower']:,.2f}",
+                              f"{p['upper']:,.2f}"] for p in points],
+                        )
+                    )
+            elif artifact.kind == "code":
+                story.append(Spacer(1, 3))
+                story.append(para(artifact.title, "h3"))
+                story.append(code_block(payload.get("code", "")))
+
+        if message.sql_executed:
+            story.append(para("SQL executed", "h3"))
+            for statement in message.sql_executed:
+                story.append(code_block(statement))
+        story.append(Spacer(1, 6))
+
+    story.append(Spacer(1, 8))
+    story.append(
+        para(
+            "All figures in this report came from SQL or a restricted pandas expression "
+            "executed against the uploaded data.",
+            "meta",
+        )
+    )
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

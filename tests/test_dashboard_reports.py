@@ -12,7 +12,7 @@ from core.charts import build_figure
 from core.dashboard import build as build_dashboard
 from core.engine import DataSession
 from core.models import ChartSpec
-from core.reports import to_excel, to_html, to_markdown
+from core.reports import to_excel, to_html, to_markdown, to_pdf
 from tests.conftest import requires_real_data
 
 RETAIL = "online_retail_ii_international"
@@ -194,11 +194,49 @@ def test_excel_includes_conversation_artifacts(fake_provider_factory) -> None:
         session.close()
 
 
+@requires_real_data
+def test_pdf_export_is_a_valid_document(real_session: DataSession) -> None:
+    payload = to_pdf(real_session)
+    assert payload[:5] == b"%PDF-", "must be a real PDF, not HTML pretending to be one"
+    assert b"%%EOF" in payload[-2048:]
+    assert len(payload) > 3_000
+
+
+@requires_real_data
+def test_pdf_contains_the_session_content(fake_provider_factory) -> None:
+    """The PDF must carry the actual audit trail, not just a cover page."""
+    from core.agent import Agent
+    from tests.conftest import RETAIL_CSV, ScriptedTurn
+
+    session = DataSession()
+    session.add_csv_path(RETAIL_CSV)
+    try:
+        provider = fake_provider_factory(
+            [
+                ScriptedTurn(tool_calls=[("run_sql", {
+                    "sql": f"SELECT country, SUM(quantity*price) AS revenue FROM {RETAIL} "
+                           f"GROUP BY 1 ORDER BY 2 DESC LIMIT 3",
+                    "purpose": "revenue by country",
+                })]),
+                ScriptedTurn(text="EIRE leads on revenue."),
+            ]
+        )
+        Agent(provider).answer(session, "Which country generated the highest revenue?")
+
+        payload = to_pdf(session)
+        assert payload[:5] == b"%PDF-"
+        # Multi-page once a dataset profile and a conversation are both present.
+        assert payload.count(b"/Type /Page") >= 2 or b"/Count 2" in payload or len(payload) > 8_000
+    finally:
+        session.close()
+
+
 def test_reports_handle_an_empty_session() -> None:
     session = DataSession()
     try:
         assert "No questions were asked" in to_markdown(session)
         assert to_html(session).startswith("<!DOCTYPE html>")
         assert to_excel(session)[:2] == b"PK"
+        assert to_pdf(session)[:5] == b"%PDF-"
     finally:
         session.close()

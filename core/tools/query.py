@@ -249,6 +249,89 @@ def _generate_code(session: "DataSession", args: dict[str, Any]) -> ToolOutcome:
     )
 
 
+def _run_pandas(session: "DataSession", args: dict[str, Any]) -> ToolOutcome:
+    """Execute a restricted pandas expression against the session's DataFrames."""
+    from ..pandas_exec import execute
+
+    code = (args.get("code") or "").strip()
+    purpose = (args.get("purpose") or "").strip()
+    table = (args.get("table") or "").strip() or None
+    if not code:
+        raise ToolError("The 'code' argument is required.")
+    if table:
+        session.get_dataset(table)  # raises a typed error for an unknown table
+
+    frames = {name: dataset.frame for name, dataset in session.datasets.items()}
+    result = execute(code, frames, primary=table or session.default_table())
+
+    lines = [
+        f"Executed pandas: `{result.code}`",
+        f"Returned a {result.result_kind} with {result.row_count} row(s) in {result.duration_ms:.0f} ms.",
+    ]
+    lines.extend(result.warnings)
+    lines.append("Result:")
+    lines.append(result.to_markdown(limit=MAX_MODEL_ROWS))
+
+    artifacts = [
+        Artifact(
+            kind="table",
+            title=purpose or "Pandas result",
+            payload={
+                "columns": result.columns,
+                "rows": result.rows,
+                "row_count": result.row_count,
+                "truncated": result.truncated,
+                "duration_ms": round(result.duration_ms, 1),
+                "pandas": result.code,
+            },
+        ),
+        Artifact(
+            kind="code",
+            title="Pandas code (executed)",
+            payload={
+                "language": "python",
+                "code": result.code,
+                "explanation": purpose,
+                "note": (
+                    "This expression was executed. It passed a restricted-grammar check first: "
+                    "a single expression, an AST node allow-list, a pandas method allow-list, "
+                    "no dunder access, and an empty builtins namespace."
+                ),
+            },
+        ),
+    ]
+    return ToolOutcome(
+        model_text="\n".join(lines),
+        artifacts=artifacts,
+        reasoning=purpose or f"Ran pandas `{result.code}` and got {result.row_count} row(s).",
+    )
+
+
+RUN_PANDAS = Tool(
+    name="run_pandas",
+    description=(
+        "Execute a single pandas expression against the loaded DataFrames and get the result back. "
+        "`df` is bound to the main table; every table is also available under its own name. "
+        "Use this when pandas is genuinely more natural than SQL — rolling windows, pct_change, "
+        "string/datetime accessors, describe(), correlations. For plain aggregation, grouping and "
+        "ranking prefer run_sql. Only one expression, no assignments or imports; a restricted set "
+        "of pandas methods is permitted and anything else is refused with a reason."
+    ),
+    parameters=object_schema(
+        {
+            "code": string_param(
+                "One pandas expression, e.g. "
+                "df.groupby('country')['quantity'].sum().sort_values(ascending=False).head(5)"
+            ),
+            "purpose": string_param("Short description of what this establishes."),
+            "table": string_param("Table to bind to `df`. Omit to use the main table."),
+        },
+        required=["code"],
+    ),
+    handler=_run_pandas,
+)
+
+
 GENERATE_CODE = Tool(
     name="generate_code",
     description=(

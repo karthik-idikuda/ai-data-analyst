@@ -53,7 +53,12 @@ def main() -> int:
     print("\nhealth")
     health = client.get("/health").json()
     check("service up", health["status"] == "ok", f"v{health['version']}")
-    check("tools registered", len(health["tools"]) == 8, ", ".join(health["tools"]))
+    expected_tools = {
+        "run_sql", "run_pandas", "create_chart", "detect_anomalies", "forecast",
+        "inspect_schema", "data_quality_report", "search_columns", "generate_code",
+    }
+    check("all tools registered", set(health["tools"]) == expected_tools,
+          f"{len(health['tools'])}: " + ", ".join(health["tools"]))
     print(f"  {DIM}llm configured: {health['llm']['configured']} "
           f"({health['llm']['provider']}, {health['llm']['model']}){RESET}")
 
@@ -128,6 +133,33 @@ def main() -> int:
                          json={"sql": f"SELECT * FROM {RETAIL}", "max_rows": 10}).json()
     check("row cap enforced", capped["result"]["row_count"] == 10 and capped["guard"]["limit_applied"] == 10)
 
+    print("\npandas execution tool (restricted grammar)")
+    from core.engine import SESSIONS
+    from core.errors import ToolError
+    from core.tools.query import RUN_PANDAS
+
+    live = SESSIONS.get(sid)
+    outcome = RUN_PANDAS.run(live, {
+        "code": "df.assign(revenue=df['quantity'] * df['price'])"
+                ".groupby('country')['revenue'].sum().sort_values(ascending=False).head(3)",
+        "purpose": "revenue by country",
+    })
+    pandas_rows = outcome.artifacts[0].payload["rows"]
+    check("pandas expression executed", len(pandas_rows) == 3,
+          f"{pandas_rows[0][0]} = {pandas_rows[0][1]:,.2f}")
+    check("pandas agrees with SQL", abs(pandas_rows[0][1] - 615_519.55) < 1.0)
+    for label, attack in [
+        ("dunder escape refused", "().__class__.__bases__[0].__subclasses__()"),
+        ("__import__ refused", "__import__('os').system('id')"),
+        ("file write refused", "df.to_csv('/tmp/leak.csv')"),
+        ("assignment refused", "x = df"),
+    ]:
+        try:
+            RUN_PANDAS.run(live, {"code": attack})
+            check(label, False, "expression was NOT refused")
+        except ToolError:
+            check(label, True)
+
     print("\ndeterministic analytics")
     anomalies = client.post(f"/sessions/{sid}/anomalies",
                             json={"columns": ["quantity", "price"], "max_results": 5}).json()["report"]
@@ -167,6 +199,9 @@ def main() -> int:
     xlsx = client.get(f"/sessions/{sid}/report?format=xlsx")
     check("excel export", xlsx.status_code == 200 and xlsx.content[:2] == b"PK",
           f"{len(xlsx.content):,} bytes")
+    pdf = client.get(f"/sessions/{sid}/report?format=pdf")
+    check("pdf export", pdf.status_code == 200 and pdf.content[:5] == b"%PDF-",
+          f"{len(pdf.content):,} bytes")
     try:
         import pandas as pd
 

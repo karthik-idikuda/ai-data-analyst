@@ -6,11 +6,12 @@ from ..llm.base import ToolSpec
 from .analytics import DETECT_ANOMALIES, FORECAST
 from .base import Tool, ToolOutcome, ToolRegistry
 from .data import DATA_QUALITY, INSPECT_SCHEMA, SEARCH_COLUMNS
-from .query import CREATE_CHART, GENERATE_CODE, RUN_SQL
+from .query import CREATE_CHART, GENERATE_CODE, RUN_PANDAS, RUN_SQL
 
 REGISTRY = ToolRegistry(
     [
         RUN_SQL,
+        RUN_PANDAS,
         CREATE_CHART,
         DETECT_ANOMALIES,
         FORECAST,

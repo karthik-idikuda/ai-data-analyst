@@ -28,7 +28,7 @@ from core.llm import get_provider
 from core.models import AgentAnswer
 from core.observability import configure_logging, get_logger, new_trace_id
 from core.profile import quality_score
-from core.reports import to_excel, to_html, to_markdown
+from core.reports import to_excel, to_html, to_markdown, to_pdf
 from core.semantic import build_schema_context, suggest_questions
 from core.tools import REGISTRY
 from core.tools.analytics import DETECT_ANOMALIES, FORECAST
@@ -493,7 +493,13 @@ def report(session_id: str, format: str = "markdown") -> Any:
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="report-{session_id}.xlsx"'},
         )
+    if fmt == "pdf":
+        return Response(
+            to_pdf(session),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="report-{session_id}.pdf"'},
+        )
     raise AnalystError(
         f"Unsupported report format '{format}'.",
-        detail="Use 'markdown', 'html' or 'xlsx'.",
+        detail="Use 'markdown', 'html', 'xlsx' or 'pdf'.",
     )

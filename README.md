@@ -15,7 +15,7 @@ source: [UCI Online Retail II](https://archive.ics.uci.edu/dataset/502/online+re
 [World Bank Open Data](https://data.worldbank.org). Nothing is generated,
 simulated or synthetic. Full provenance in [`data/README.md`](data/README.md).
 
-**Status:** 283 tests passing. Verified end-to-end against the live Gemini API on
+**Status:** 330 tests passing. Verified end-to-end against the live Gemini API on
 the real data — it returns EIRE / 615,519.55, matching the independently computed
 pandas ground truth.
 
@@ -98,15 +98,98 @@ Hugging Face Space both host this for free)._
 
 ---
 
+## End-to-end flow, mapped to the code
+
+```
+USER
+ │
+ ▼  open app                          ui/app.py
+ ▼  upload CSV file(s)                multi-file, drag & drop, 200 MB each
+ ▼  validate & clean                  core/ingest.py    format · encoding · empty ·
+ │                                                      duplicate headers · missing
+ │                                                      values · wrong types
+ ▼  store as pandas DataFrame         core/engine.py    in memory, registered in DuckDB
+ ▼  profile the dataset               core/profile.py   rows · cols · dtypes · roles
+ │                                                      (measure/dimension/temporal/id)
+ ▼  AI understands the dataset        core/semantic.py  schema cards · derived metrics ·
+ │                                                      join keys → system prompt
+ ▼  user starts chatting              conversation memory across turns
+ ▼  AI plans, then picks a tool       core/agent.py     bounded plan→act→observe loop
+ │
+ ├─ analyze data ──────── run_sql          guarded DuckDB SELECT
+ ├─ analyze data ──────── run_pandas       restricted pandas, actually executed
+ ├─ create charts ─────── create_chart     validated spec → Plotly
+ ├─ detect anomalies ──── detect_anomalies IQR · robust-z · Isolation Forest · STL
+ ├─ forecast ──────────── forecast         Holt-Winters / OLS + 95% intervals
+ ├─ data quality ──────── data_quality_report
+ ├─ find columns ──────── search_columns   lexical search over the data dictionary
+ ├─ generate code ─────── generate_code    SQL or pandas, shown not run
+ └─ inspect schema ────── inspect_schema   re-read types and sample values
+ │
+ ▼  collect results
+ ▼  explain reasoning                 real steps + executed SQL + trace + `Why:` line
+ ▼  final answer + chart + SQL        ui/app.py renders artifacts
+ ▼  save conversation memory          core/engine.py session history
+ ▼  dashboard · insights · export     core/dashboard.py · core/insights.py · core/reports.py
+ ▼  end session                       reset in UI, DELETE /sessions/{id} on the API
+```
+
+Phase-by-phase, with where to look and how it is proven:
+
+| Phase | Where | Verified by |
+|---|---|---|
+| 1–2 Open app, upload one or more CSVs | `ui/app.py` | `make api-smoke` |
+| 3 Validate: format, empty, encoding, duplicate columns, missing values, wrong types | `core/ingest.py` | `tests/test_ingest.py` (30 tests) |
+| 4 Profile: rows, columns, dtypes, numeric/date/categorical | `core/profile.py` | `tests/test_profile_engine.py` |
+| 5 Store as DataFrame in memory | `core/engine.py` | — |
+| 6 Chat starts | `ui/app.py` | — |
+| 7 **AI planning** — decide which tool | `core/agent.py`, `core/prompts.py` | `tests/test_agent.py` |
+| 8 **Tool execution** — pandas *and* SQL | `core/tools/`, `core/pandas_exec.py` | `tests/test_pandas_exec.py` (45 tests) |
+| 9 LLM turns numbers into English | `core/prompts.py` | live run |
+| 10 Explain reasoning | `core/agent.py`, `core/observability.py` | trace in every answer |
+| 11 Charts (Plotly) | `core/charts.py` | `tests/test_analytics.py` |
+| 12 Business insights | `core/insights.py` | `tests/test_analytics.py` |
+| 13 Generate SQL | `core/tools/query.py` | eval case `generate_sql` |
+| 14 Generate pandas code | `core/tools/query.py` | `tests/test_agent.py` |
+| 15 Anomalies (Isolation Forest, z-score) | `core/anomaly.py` | `tests/test_analytics.py` |
+| 16 Conversation memory | `core/engine.py`, `core/agent.py` | `tests/test_agent.py` |
+| 17 Multiple CSVs + relationships | `core/profile.py::detect_join_hints` | 79% overlap detected on the real files |
+| 18 Dashboard with KPIs | `core/dashboard.py` | `tests/test_dashboard_reports.py` |
+| 19 Export PDF / Excel / MD / HTML | `core/reports.py` | `tests/test_dashboard_reports.py` |
+| 20 End session | `core/engine.py::SessionStore` | `tests/test_api.py` |
+
+### Both analysis engines, and why
+
+Phase 8 in the flow runs pandas. This app does that — `run_pandas` executes the
+expression the model writes and returns the result — **and** it offers SQL over
+DuckDB, letting the model choose. Both paths are cross-checked against each other:
+`tests/test_pandas_exec.py::test_pandas_and_sql_agree_on_the_real_data` asserts they
+produce the same total on the real 86,041-row file.
+
+Executing model-written Python is the single most dangerous thing an app like this
+can do, so `core/pandas_exec.py` fences it four ways: one expression only (parsed
+with `mode="eval"`, so assignments, imports and loops are syntax errors), an AST
+node allow-list, a pandas method allow-list with dunder access blocked, and
+evaluation with empty `__builtins__` and only the DataFrames bound. Plus a
+wall-clock budget, a row cap, and a copied frame so a mutating expression cannot
+corrupt session data.
+
+`tests/test_pandas_exec.py` throws 21 real escape attempts at it, including
+`().__class__.__bases__[0].__subclasses__()`, `__import__('os').system('id')`,
+`df.query(...)`, `df.eval(...)` and `df.to_csv('/tmp/leak.csv')`. All are refused
+with a reason the agent can act on.
+
+---
+
 ## What it does
 
 | Requirement | How |
 |---|---|
 | Upload and validate one or more CSVs | Encoding and delimiter sniffing, header normalisation, conservative type inference, per-file typed errors, partial-success uploads |
-| Answer questions in natural language | Tool-calling agent over a guarded SQL engine, 8 tools |
+| Answer questions in natural language | Tool-calling agent with 9 tools over both a guarded SQL engine and a restricted pandas executor |
 | Business insights and summaries | Statistics computed by SQL, then narrated by the LLM from those numbers only |
 | Charts | Model emits a validated JSON chart spec; Plotly renders. 9 chart types |
-| Generate SQL / pandas code | SQL is guard-validated; pandas is syntax-checked, screened and **displayed, never executed** |
+| Generate SQL / pandas code | `run_sql` and `run_pandas` execute and show the code; `generate_code` returns reviewable code without running it. SQL is guard-validated; pandas passes a restricted-grammar check |
 | Detect anomalies and explain them | Tukey IQR, robust z-score (median/MAD), Isolation Forest, STL seasonal residual — each flag reports its method, threshold and observed value |
 | Explain its reasoning | The actual steps taken: tool calls, executed SQL, timings, token counts, which model answered, plus a one-line `Why:` basis |
 | Conversation context | Rolling window of prior turns with the SQL used, so "and the second one?" resolves |
@@ -115,9 +198,26 @@ Hugging Face Space both host this for free)._
 detection · auto-generated KPI dashboard · data-quality scoring · forecasting with
 confidence intervals · agentic tool-calling workflow · lexical semantic search over
 the data dictionary · answer caching keyed on a schema fingerprint · optional
-API-key auth · Markdown / HTML / **Excel** report export · streaming responses
+API-key auth · **PDF / Excel** / Markdown / HTML report export · streaming responses
 (SSE) · structured logging with per-turn traces · model fallback chain ·
 **an evaluation framework with independently computed ground truth**.
+
+Two items on the bonus list were deliberately **not** built, with reasons:
+
+- **Multi-agent split (Planner → Analyst → Chart Generator → Report Writer).** One
+  agent with well-specified tools already performs each of those roles, and every
+  step is visible in the trace. Splitting them multiplies LLM round-trips — each one
+  latency, cost and a new failure mode — without answering questions any better.
+  Judgement call; happy to be argued out of it.
+- **Embedding-based semantic search.** `search_columns` does lexical scoring over
+  column names *and* real values, which is what actually helps on a wide CSV. It is
+  labelled lexical rather than dressed up as semantic.
+
+The suggested stack listed LangGraph. The agent loop here is ~150 hand-written
+lines instead: no hidden control flow, unit-testable with a scripted fake provider,
+and every transition recorded. A graph runtime earns its place when you need
+checkpointed state, resumable branches or human-in-the-loop pauses; a single
+analytics turn needs none of those.
 
 ---
 
@@ -141,17 +241,18 @@ core/           the engine — imports neither Streamlit nor FastAPI
 ├── agent.py        bounded plan → act → observe loop
 ├── anomaly.py      four statistical detectors with numeric explanations
 ├── forecast.py     Holt-Winters / OLS with prediction intervals
+├── pandas_exec.py  restricted pandas execution (AST + method allow-lists)
 ├── charts.py       chart-spec validation and Plotly rendering
 ├── dashboard.py    deterministic KPI + panel generation
 ├── insights.py     verified facts (SQL) + narration (LLM)
 ├── reports.py      Markdown / HTML / Excel export
 ├── llm/            provider abstraction over raw HTTP + model fallback chain
-└── tools/          the eight tools the agent can call
+└── tools/          the nine tools the agent can call
 
 api/main.py     FastAPI: REST + SSE, optional X-API-Key
 ui/app.py       Streamlit: Chat · Dashboard · Insights · SQL
 evals/          golden question set + pandas ground truth + harness
-tests/          283 tests
+tests/          330 tests
 ```
 
 `core/` is UI-free, so the tests and the eval harness run the exact code the app
@@ -190,11 +291,14 @@ and the database:
    be turned back on.
 5. **Row cap** — LIMIT injected, or reduced if the model asked for more.
 6. **Timeout** — worker thread plus `connection.interrupt()`.
-7. **No code execution** — generated pandas is parsed, screened and shown. There is
-   no `exec` in the codebase.
+7. **Fenced pandas execution** — one expression, AST node allow-list, pandas method
+   allow-list, no dunder access, empty `__builtins__`, wall-clock budget, row cap,
+   copied frame. There is no bare `eval`/`exec` of model text anywhere.
 
-`tests/test_guard.py` covers 40 cases including `SELECT 1; DROP TABLE sales`,
+`tests/test_guard.py` covers 40 SQL cases including `SELECT 1; DROP TABLE sales`,
 `read_csv_auto('/etc/passwd')` and a header crafted as `"a"; DROP TABLE x; --`.
+`tests/test_pandas_exec.py` covers 21 Python sandbox escapes including
+`().__class__.__bases__[0].__subclasses__()` and `__import__('os').system('id')`.
 
 Note: **the API has no auth unless you set `APP_API_KEY`.** Fine on localhost; set
 it before exposing the service.
@@ -234,7 +338,7 @@ request still surfaces as a real failure.
 ## Testing
 
 ```bash
-make test           # 283 tests, no API key needed
+make test           # 330 tests, no API key needed
 make test-cov       # with coverage
 make eval-offline   # pandas vs DuckDB cross-check
 make eval           # full LLM evaluation (needs a key)
@@ -348,7 +452,7 @@ curl -sX POST localhost:8000/sessions/$SID/chat \
 | `POST /sessions/{id}/anomalies` · `/forecast` | Deterministic analytics — no LLM |
 | `GET /sessions/{id}/dashboard` | Auto KPIs + chart panels — no LLM |
 | `GET /sessions/{id}/insights` · `/insights/stream` | Facts + narration; token streaming |
-| `GET /sessions/{id}/report?format=markdown\|html\|xlsx` | Session export |
+| `GET /sessions/{id}/report?format=pdf\|xlsx\|markdown\|html` | Session export |
 
 Interactive docs at `/docs`.
 
@@ -390,12 +494,10 @@ Interactive docs at `/docs`.
 
 **Not implemented**
 
-Row-level access control, multi-tenancy, user accounts, a persistent warehouse
-connector, native PDF export (the HTML export prints to PDF from any browser), and
-embedding-based semantic search (the dictionary search is lexical and labelled as
-such). A multi-agent Planner/Analyst/Charter split was considered and rejected: it
-multiplies latency and failure modes without answering questions any better than
-one agent with well-specified tools.
+Row-level access control, multi-tenancy, user accounts (the API has shared-secret
+auth, not per-user login), a persistent warehouse connector, embedding-based
+semantic search, and a multi-agent Planner/Analyst/Charter split. Reasons for the
+last two are in the bonus-features section above.
 
 ---
 

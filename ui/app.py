@@ -55,7 +55,7 @@ from core.errors import AnalystError
 from core.insights import compute_facts, deterministic_summary, narrate
 from core.models import Artifact, ChartSpec
 from core.observability import configure_logging, get_logger
-from core.reports import to_excel, to_html, to_markdown
+from core.reports import to_excel, to_html, to_markdown, to_pdf
 from core.semantic import suggest_questions
 from ui.app_helpers import fmt_bound
 
@@ -379,8 +379,18 @@ with st.sidebar:
                 )
 
         st.divider()
-        st.markdown("#### 3. Export")
-        cols = st.columns(3)
+        st.markdown("#### 3. Export report")
+        cols = st.columns(2)
+        cols[0].download_button(
+            "PDF", to_pdf(session), file_name=f"report-{session.session_id}.pdf",
+            mime="application/pdf", use_container_width=True,
+        )
+        cols[1].download_button(
+            "Excel", to_excel(session), file_name=f"report-{session.session_id}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        cols = st.columns(2)
         cols[0].download_button(
             "Markdown", to_markdown(session), file_name=f"report-{session.session_id}.md",
             mime="text/markdown", use_container_width=True,
@@ -389,12 +399,6 @@ with st.sidebar:
             "HTML", to_html(session), file_name=f"report-{session.session_id}.html",
             mime="text/html", use_container_width=True,
         )
-        cols[2].download_button(
-            "Excel", to_excel(session), file_name=f"report-{session.session_id}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-        st.caption("HTML prints to PDF from any browser (⌘P → Save as PDF).")
 
     st.divider()
     with st.expander("Diagnostics"):
