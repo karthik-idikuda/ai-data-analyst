@@ -31,12 +31,14 @@ flowchart TB
 
     subgraph engine["Engine — core/ (no UI or web dependency)"]
         AGENT["Agent<br/>core/agent.py<br/>bounded plan→act→observe loop"]
-        LLM["Provider abstraction<br/>core/llm/<br/>Gemini · Groq · OpenAI · Null"]
-        TOOLS["Tool registry<br/>core/tools/"]
+        LLM["Provider abstraction<br/>core/llm/<br/>Gemini · Groq · OpenAI · Null<br/>+ model fallback chain"]
+        TOOLS["Tool registry — 9 tools<br/>core/tools/"]
         GUARD["SQL guard<br/>core/guard.py<br/>sqlglot AST validation"]
+        PYGUARD["Pandas sandbox<br/>core/pandas_exec.py<br/>AST + method allow-lists"]
         SEM["Semantic layer<br/>core/semantic.py<br/>schema cards · derived metrics · join keys"]
         DUCK["DuckDB session<br/>core/engine.py<br/>read-only · row cap · timeout"]
-        STATS["Deterministic analytics<br/>anomaly · forecast · charts · insights"]
+        STATS["Deterministic analytics<br/>anomaly · forecast · charts<br/>insights · dashboard"]
+        REP["Exports<br/>core/reports.py<br/>PDF · Excel · MD · HTML"]
         OBS["Observability<br/>structlog · Trace"]
         CACHE["Answer cache<br/>question + schema fingerprint"]
     end
@@ -57,21 +59,54 @@ flowchart TB
     AGENT -. system prompt .-> SEM
 
     TOOLS --> GUARD
+    TOOLS --> PYGUARD
     TOOLS --> STATS
     GUARD --> DUCK
+    PYGUARD --> INGEST
     STATS --> DUCK
+    STATS --> REP
     SEM --> INGEST
     DUCK --> INGEST
     INGEST --> CSV
 
     classDef safety fill:#fee2e2,stroke:#dc2626,stroke-width:2px
     classDef deterministic fill:#dcfce7,stroke:#16a34a
-    class GUARD safety
-    class STATS,INGEST deterministic
+    class GUARD,PYGUARD safety
+    class STATS,INGEST,REP deterministic
 ```
 
-Red is the security boundary. Green is deterministic — those paths need no API key
-and give the same answer every time.
+Red is a security boundary — there are two, because the app has two execution
+engines. Green is deterministic: those paths need no API key and give the same
+answer every time.
+
+## The two execution engines
+
+The model picks between them per question, and both are fenced.
+
+| | `run_sql` | `run_pandas` |
+|---|---|---|
+| Engine | DuckDB, read-only | pandas, in-process |
+| Good at | grouping, ranking, filtering, joins across files | `describe()`, `pct_change`, rolling windows, str/dt accessors, correlations |
+| Validation | sqlglot AST: one SELECT, table allow-list, function deny-list | `ast.parse(mode="eval")`: one expression, node allow-list, method allow-list, no dunders |
+| Namespace | only registered tables | only the DataFrames; `__builtins__` emptied |
+| Limits | row cap, 30 s timeout, engine hardening | row cap, 20 s budget, copied frame |
+| Escape tests | 40 (`tests/test_guard.py`) | 21 (`tests/test_pandas_exec.py`) |
+
+They are cross-checked against each other: `test_pandas_and_sql_agree_on_the_real_data`
+asserts both produce the same revenue total on the real 86,041-row file.
+
+### Why executing pandas is safe enough to do here
+
+`mode="eval"` is the load-bearing decision. It means the parser rejects assignments,
+imports, loops, `with`, semicolon chains and comprehension tricks as *syntax errors*
+before any validation logic runs — the dangerous constructs are unrepresentable
+rather than merely blocked. The allow-lists then reduce what remains to data
+manipulation, and blocking any attribute starting with `_` closes the standard
+`().__class__.__bases__[0].__subclasses__()` route to arbitrary classes.
+
+When something legitimate gets refused, the error names the reason and the agent
+falls back to SQL, which is the more capable path anyway. A false negative costs one
+retry; a false positive would cost remote code execution.
 
 ## Request flow for one question
 
@@ -81,7 +116,7 @@ sequenceDiagram
     participant A as Agent
     participant M as LLM
     participant G as Guard
-    participant D as DuckDB
+    participant D as DuckDB / pandas
 
     U->>A: "Which country generated the highest revenue?"
     A->>A: cache lookup (question + schema fingerprint)
@@ -151,7 +186,8 @@ core/          engine        — no UI, no web framework
 | 4. Engine hardening | `enable_external_access=false`, then `lock_configuration=true` | Filesystem and network access even if a query slipped through, and re-enabling it |
 | 5. Row cap | LIMIT injected/reduced by the guard | Memory exhaustion from an unbounded scan |
 | 6. Timeout | Worker thread + `connection.interrupt()` | A cartesian join hanging the app |
-| 7. No code execution | Generated pandas is parsed and screened, then **displayed only** | Arbitrary code execution — there is no `exec` anywhere in the app |
+| 7. Pandas sandbox | `core/pandas_exec.py` — single expression, AST node allow-list, method allow-list, no dunder access, empty `__builtins__`, copied frame, 20 s budget | Arbitrary code execution via the pandas tool |
+| 8. Code-only mode | `generate_code` validates and **displays** without running | Executing code the user has not seen |
 
 ## Known limitations
 

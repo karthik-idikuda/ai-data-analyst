@@ -27,6 +27,13 @@ jobs:
         # cross-check runs against the committed real datasets.
         run: pytest -q -p no:warnings --cov=core --cov=api --cov-report=term-missing
 
+      - name: End-to-end smoke test
+        # Exercises the whole deterministic surface over HTTP against the real
+        # files, including the SQL-injection and pandas-sandbox rejections.
+        run: python scripts/api_smoke.py
+        env:
+          LOG_LEVEL: ERROR
+
       - name: Verify the real datasets are present and intact
         run: |
           python - <<'PY'

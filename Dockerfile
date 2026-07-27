@@ -26,7 +26,17 @@ FROM python:3.11-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    # Arrow's bundled mimalloc allocator segfaults when Table.from_pandas runs on
+    # a fresh worker thread, which is exactly how Streamlit executes every script
+    # run. ui/app.py sets this too; setting it here covers both services.
+    ARROW_DEFAULT_MEMORY_POOL=system \
+    # One OpenMP runtime per process. scikit-learn/SciPy and Arrow each bring one.
+    OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    VECLIB_MAXIMUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
