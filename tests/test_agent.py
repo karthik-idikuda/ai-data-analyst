@@ -50,10 +50,49 @@ def test_schema_context_is_in_the_system_prompt(
     real_session: DataSession, fake_provider_factory
 ) -> None:
     provider = fake_provider_factory([ScriptedTurn(text="done")])
-    Agent(provider).answer(real_session, "hello")
+    Agent(provider).answer(real_session, "Tell me about this data")
     system = provider.systems[0]
     assert "invoicedate" in system and "world_bank_region" in system
     assert "DERIVED METRICS" in system
+
+
+@pytest.mark.parametrize(
+    "greeting",
+    ["hi", "hey", "Hi!", "hello", "hey there", "thanks", "thank you", "ok cool",
+     "what can you do?", "who are you?"],
+)
+@requires_real_data
+def test_small_talk_never_declares_any_tool(
+    real_session: DataSession, fake_provider_factory, greeting: str
+) -> None:
+    """A greeting must not be able to trigger a chart, a schema dump, or any
+    other tool call. Regression test for a real bug: telling the model in the
+    prompt not to use a tool for a greeting was not reliable — it would reach
+    for a different tool (inspect_schema) instead of none. The fix omits tool
+    declarations entirely on a detected small-talk turn."""
+    provider = fake_provider_factory([ScriptedTurn(text="Hi! Ask me anything about your data.")])
+    answer = Agent(provider).answer(real_session, greeting)
+
+    assert provider.calls, "the provider should still be called once for a reply"
+    assert provider.calls[0]["tools"] == [], "no tool must be declared on a small-talk turn"
+    assert answer.artifacts == []
+    assert answer.sql_executed == []
+    assert "Why:" not in answer.answer_markdown
+
+
+@requires_real_data
+def test_a_real_question_still_declares_tools(
+    real_session: DataSession, fake_provider_factory
+) -> None:
+    """Guard against the small-talk gate over-firing on genuine questions."""
+    provider = fake_provider_factory(
+        [
+            ScriptedTurn(tool_calls=[("run_sql", {"sql": REVENUE_SQL, "purpose": "revenue"})]),
+            ScriptedTurn(text="EIRE leads.\nWhy: summed revenue by country."),
+        ]
+    )
+    Agent(provider).answer(real_session, "Which country generated the highest revenue?")
+    assert "run_sql" in provider.calls[0]["tools"]
 
 
 @requires_real_data
@@ -277,6 +316,61 @@ def test_dangerous_generated_code_is_blocked(
     )
     answer = Agent(provider).answer(real_session, "delete my disk")
     assert not [a for a in answer.artifacts if a.kind == "code"]
+
+
+# --------------------------------------------------------------------------- #
+# Anomaly invocation policy
+# --------------------------------------------------------------------------- #
+@requires_real_data
+def test_anomaly_tool_is_hidden_and_blocked_without_explicit_user_intent(
+    real_session: DataSession, fake_provider_factory
+) -> None:
+    provider = fake_provider_factory(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ("detect_anomalies", {"table": RETAIL, "columns": ["quantity"]})
+                ]
+            ),
+            ScriptedTurn(text="I used ordinary analysis instead."),
+        ]
+    )
+    answer = Agent(provider).answer(real_session, "Summarise monthly sales trends")
+
+    advertised = set(provider.calls[0]["tools"])
+    assert "detect_anomalies" not in advertised
+    assert not [artifact for artifact in answer.artifacts if artifact.kind == "anomaly"]
+    tool_messages = [
+        content
+        for call in provider.calls
+        for role, content, _ in call["messages"]
+        if role == "tool"
+    ]
+    assert any("Anomaly detection was not run" in message for message in tool_messages)
+
+
+@requires_real_data
+def test_anomaly_tool_runs_when_user_explicitly_requests_it(
+    real_session: DataSession, fake_provider_factory
+) -> None:
+    provider = fake_provider_factory(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    (
+                        "detect_anomalies",
+                        {"table": RETAIL, "columns": ["quantity"], "max_results": 1},
+                    )
+                ]
+            ),
+            ScriptedTurn(text="The requested anomaly scan is complete."),
+        ]
+    )
+    answer = Agent(provider).answer(real_session, "Detect anomalies in quantity")
+
+    advertised = set(provider.calls[0]["tools"])
+    assert "detect_anomalies" in advertised
+    assert any(artifact.kind == "anomaly" for artifact in answer.artifacts)
 
 
 # --------------------------------------------------------------------------- #

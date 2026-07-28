@@ -1,204 +1,180 @@
-# Architecture
+# Architecture — AI Data Analyst
 
-## The core idea
+> Built for the Digital Back Office AI Engineer Assignment
 
-An LLM is good at turning a vague business question into a precise query. It is
-bad at arithmetic, and it will confidently invent a column name. So the model is
-allowed to *propose* and *narrate*, and is never allowed to *compute* or *execute*.
+---
 
-```
-question ──▶ LLM proposes SQL ──▶ deterministic guard ──▶ DuckDB executes ──▶ LLM narrates result
-                                        │
-                                    rejects → error text goes back to the model, which retries
-```
-
-Every number the user sees came out of a query that is shown to them. The
-statistics (anomaly thresholds, forecasts, quality scores) are computed in
-pandas/numpy/scikit-learn, never by the model.
-
-## System diagram
-
-```mermaid
-flowchart TB
-    subgraph clients["Clients"]
-        UI["Streamlit UI<br/>ui/app.py"]
-        HTTP["HTTP clients<br/>curl · scripts · evals"]
-    end
-
-    subgraph api["Transport — api/main.py"]
-        REST["FastAPI<br/>REST + SSE · optional X-API-Key"]
-    end
-
-    subgraph engine["Engine — core/ (no UI or web dependency)"]
-        AGENT["Agent<br/>core/agent.py<br/>bounded plan→act→observe loop"]
-        LLM["Provider abstraction<br/>core/llm/<br/>Gemini · Groq · OpenAI · Null<br/>+ model fallback chain"]
-        TOOLS["Tool registry — 9 tools<br/>core/tools/"]
-        GUARD["SQL guard<br/>core/guard.py<br/>sqlglot AST validation"]
-        PYGUARD["Pandas sandbox<br/>core/pandas_exec.py<br/>AST + method allow-lists"]
-        SEM["Semantic layer<br/>core/semantic.py<br/>schema cards · derived metrics · join keys"]
-        DUCK["DuckDB session<br/>core/engine.py<br/>read-only · row cap · timeout"]
-        STATS["Deterministic analytics<br/>anomaly · forecast · charts<br/>insights · dashboard"]
-        REP["Exports<br/>core/reports.py<br/>PDF · Excel · MD · HTML"]
-        OBS["Observability<br/>structlog · Trace"]
-        CACHE["Answer cache<br/>question + schema fingerprint"]
-    end
-
-    subgraph data["Data"]
-        INGEST["Ingestion + profiling<br/>core/ingest.py · core/profile.py"]
-        CSV[("Real CSVs<br/>UCI Online Retail II<br/>World Bank WDI")]
-    end
-
-    UI --> AGENT
-    HTTP --> REST
-    REST --> AGENT
-
-    AGENT <--> LLM
-    AGENT --> TOOLS
-    AGENT --> CACHE
-    AGENT --> OBS
-    AGENT -. system prompt .-> SEM
-
-    TOOLS --> GUARD
-    TOOLS --> PYGUARD
-    TOOLS --> STATS
-    GUARD --> DUCK
-    PYGUARD --> INGEST
-    STATS --> DUCK
-    STATS --> REP
-    SEM --> INGEST
-    DUCK --> INGEST
-    INGEST --> CSV
-
-    classDef safety fill:#fee2e2,stroke:#dc2626,stroke-width:2px
-    classDef deterministic fill:#dcfce7,stroke:#16a34a
-    class GUARD,PYGUARD safety
-    class STATS,INGEST,REP deterministic
-```
-
-Red is a security boundary — there are two, because the app has two execution
-engines. Green is deterministic: those paths need no API key and give the same
-answer every time.
-
-## The two execution engines
-
-The model picks between them per question, and both are fenced.
-
-| | `run_sql` | `run_pandas` |
-|---|---|---|
-| Engine | DuckDB, read-only | pandas, in-process |
-| Good at | grouping, ranking, filtering, joins across files | `describe()`, `pct_change`, rolling windows, str/dt accessors, correlations |
-| Validation | sqlglot AST: one SELECT, table allow-list, function deny-list | `ast.parse(mode="eval")`: one expression, node allow-list, method allow-list, no dunders |
-| Namespace | only registered tables | only the DataFrames; `__builtins__` emptied |
-| Limits | row cap, 30 s timeout, engine hardening | row cap, 20 s budget, copied frame |
-| Escape tests | 40 (`tests/test_guard.py`) | 21 (`tests/test_pandas_exec.py`) |
-
-They are cross-checked against each other: `test_pandas_and_sql_agree_on_the_real_data`
-asserts both produce the same revenue total on the real 86,041-row file.
-
-### Why executing pandas is safe enough to do here
-
-`mode="eval"` is the load-bearing decision. It means the parser rejects assignments,
-imports, loops, `with`, semicolon chains and comprehension tricks as *syntax errors*
-before any validation logic runs — the dangerous constructs are unrepresentable
-rather than merely blocked. The allow-lists then reduce what remains to data
-manipulation, and blocking any attribute starting with `_` closes the standard
-`().__class__.__bases__[0].__subclasses__()` route to arbitrary classes.
-
-When something legitimate gets refused, the error names the reason and the agent
-falls back to SQL, which is the more capable path anyway. A false negative costs one
-retry; a false positive would cost remote code execution.
-
-## Request flow for one question
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant A as Agent
-    participant M as LLM
-    participant G as Guard
-    participant D as DuckDB / pandas
-
-    U->>A: "Which country generated the highest revenue?"
-    A->>A: cache lookup (question + schema fingerprint)
-    A->>M: system prompt with schema cards, roles,<br/>real sample values, derived-metric hints
-    M-->>A: tool call: run_sql(SELECT country, SUM(quantity*price) …)
-    A->>G: validate
-    G->>G: single statement · SELECT only · tables allow-listed<br/>· no file/network functions · LIMIT injected
-    G-->>A: rewritten SQL
-    A->>D: execute (read-only, 30s budget)
-    D-->>A: 5 rows
-    A->>M: rows + row count + timing
-    M-->>A: prose answer + "Why:" line
-    A-->>U: answer · table · SQL · reasoning trail · trace
-```
-
-If the guard rejects, or a column does not exist, the error text is returned to
-the model as the tool result and it retries with a corrected call. An identical
-repeated call is refused, which is the usual way a tool-calling loop spins.
-
-## Why these choices
-
-**DuckDB** queries DataFrames in-process with no load step, makes cross-file joins
-free, and is a sandbox by construction — a bad generated query cannot reach a real
-warehouse.
-
-**sqlglot** parses to an AST, so validation is structural rather than regex-based.
-String scanning is used only as a secondary check, after literals are stripped so
-data cannot trip it.
-
-**A hand-written agent loop** instead of a framework. It is ~150 lines with no
-hidden control flow, unit-testable with a scripted fake provider, and every
-transition lands in a trace. A graph runtime earns its place when you need
-checkpointed state, resumable branches or human-in-the-loop pauses; a single
-analytics turn needs none of those.
-
-**Raw HTTP for every LLM provider** rather than three vendor SDKs: one dependency,
-one upgrade path, and an identical tool-calling contract, so the agent contains no
-provider conditionals.
-
-**A rich semantic layer.** Published evaluations of LLM-generated SQL find failures
-are dominated by schema hallucination and wrong join paths rather than syntax, and
-that supplying explicit schema context is what lifts accuracy substantially. So
-the model gets exact names and types, inferred column roles, real sample values,
-measured ranges, null rates, verified join keys with overlap percentages, and
-explicit arithmetic for metrics the data does not store.
-
-## Layering rule
-
-`core/` imports neither Streamlit nor FastAPI. The UI, the HTTP API and the
-evaluation harness are three peer consumers of the same library, which is why the
-tests exercise the exact code the app runs.
+## High-Level Overview
 
 ```
-core/          engine        — no UI, no web framework
-├── api/       transport     — imports core
-├── ui/        presentation  — imports core
-└── evals/     evaluation    — imports core
+┌─────────────────────────────────────────────────────────────────────┐
+│                        User Interface                               │
+│                   Streamlit  (port 8501)                            │
+│   ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │
+│   │  Chat    │ │Overview  │ │ Insights │ │ Quality  │ │ Explore│  │
+│   └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘ └───┬────┘  │
+└────────┼────────────┼────────────┼─────────────┼───────────┼───────┘
+         │            │            │             │           │
+         ▼            ▼            ▼             ▼           ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                          Core Engine                                │
+│                                                                     │
+│  ┌─────────────┐  ┌───────────────┐  ┌────────────────────────┐    │
+│  │  DataSession │  │    Agent      │  │   Deterministic Layer  │    │
+│  │             │  │  (LLM loop)   │  │                        │    │
+│  │ - datasets  │  │               │  │  ┌──────────────────┐  │    │
+│  │ - history   │◄─┤ plan → act    │  │  │  dashboard.py    │  │    │
+│  │ - join_hints│  │ → observe     │  │  │  anomaly.py      │  │    │
+│  │             │  │ → answer      │  │  │  insights.py     │  │    │
+│  └─────────────┘  │               │  │  │  forecast.py     │  │    │
+│                   │  ┌──────────┐ │  │  │  profile.py      │  │    │
+│  ┌─────────────┐  │  │  Tools   │ │  │  │  reports.py      │  │    │
+│  │   Ingest    │  │  │          │ │  │  └──────────────────┘  │    │
+│  │             │  │  │ run_sql  │ │  └────────────────────────┘    │
+│  │ - CSV parse │  │  │ run_pand │ │                                 │
+│  │ - type cast │  │  │ create_  │ │  ┌──────────────────────────┐  │
+│  │ - validate  │  │  │   chart  │ │  │    Guard (Read-Only SQL)  │  │
+│  └──────┬──────┘  │  │ anomaly  │ │  │                          │  │
+│         │         │  │ forecast │ │  │  - AST parse every SQL   │  │
+│         ▼         │  └──────────┘ │  │  - blocks DROP/UPDATE/   │  │
+│  ┌─────────────┐  └───────┬───────┘  │    INSERT/DELETE/ATTACH  │  │
+│  │   DuckDB    │◄─────────┘          │  - row-count cap         │  │
+│  │  (in-proc)  │                     └──────────────────────────┘  │
+│  └─────────────┘                                                    │
+└─────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Supporting Services                             │
+│                                                                     │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────────┐   │
+│  │  LLM Client   │  │  Answer Cache │  │   Observability       │   │
+│  │               │  │               │  │                       │   │
+│  │  Gemini/Groq/ │  │  In-memory    │  │  Structured logging   │   │
+│  │  OpenAI       │  │  LRU keyed by │  │  per-turn Trace       │   │
+│  │  + fallback   │  │  schema + Q   │  │  step timings         │   │
+│  │    chain      │  │               │  │  token counts         │   │
+│  └───────────────┘  └───────────────┘  └───────────────────────┘   │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  FastAPI REST API  (port 8000)  — programmatic access only    │  │
+│  │  POST /sessions  · POST /datasets · POST /sql · GET /report   │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Safety layers around query execution
+---
 
-| Layer | Mechanism | Stops |
-|---|---|---|
-| 1. Identifier sanitisation | `core/ingest.py` normalises every column name at load | A crafted CSV header injecting SQL |
-| 2. AST validation | `core/guard.py` via sqlglot | Statement chaining, DDL/DML, unknown tables, schema-qualified names |
-| 3. Function deny-list | `core/guard.py` | `read_csv`, `read_parquet`, `glob`, `postgres_scan`, `getenv`, extension loading |
-| 4. Engine hardening | `enable_external_access=false`, then `lock_configuration=true` | Filesystem and network access even if a query slipped through, and re-enabling it |
-| 5. Row cap | LIMIT injected/reduced by the guard | Memory exhaustion from an unbounded scan |
-| 6. Timeout | Worker thread + `connection.interrupt()` | A cartesian join hanging the app |
-| 7. Pandas sandbox | `core/pandas_exec.py` — single expression, AST node allow-list, method allow-list, no dunder access, empty `__builtins__`, copied frame, 20 s budget | Arbitrary code execution via the pandas tool |
-| 8. Code-only mode | `generate_code` validates and **displays** without running | Executing code the user has not seen |
+## Request Flow — Natural Language Question
 
-## Known limitations
+```
+User types question
+        │
+        ▼
+  Agent.run(session, question)
+        │
+        ├─ 1. Cache lookup (schema + question hash)
+        │         Hit → return cached answer immediately
+        │
+        ├─ 2. Build system prompt
+        │         schema context (column roles, sample values, join hints)
+        │         + last 4 conversation turns for continuity
+        │
+        ├─ 3. LLM call (plan step)
+        │         Returns: list of tool calls to make
+        │         Fallback chain: gemini-3.5-flash → gemini-3.6-flash → gemini-3.1-flash-lite
+        │
+        ├─ 4. Tool execution loop
+        │    ┌─────────────────────────────────────────────────────┐
+        │    │ run_sql       → Guard validates AST → DuckDB runs   │
+        │    │ run_pandas    → Restricted exec (no imports/loops)  │
+        │    │ create_chart  → ValidatedChartSpec → Plotly figure  │
+        │    │ detect_anomaly → IQR + Z-score + Isolation Forest   │
+        │    │ forecast      → Exponential Smoothing / ARIMA       │
+        │    └─────────────────────────────────────────────────────┘
+        │
+        ├─ 5. LLM call (answer step)
+        │         Narrates over the verified tool outputs
+        │         Never invents numbers — only references actual results
+        │
+        ├─ 6. Store in session history (conversation continuity)
+        │
+        └─ 7. Cache the answer
+                    │
+                    ▼
+              AgentAnswer → UI renders artifacts (tables, charts, code)
+```
 
-- **Sessions are in-process.** One API replica only; `--workers=1` is set in
-  compose for that reason. Redis plus object storage is the change needed to scale
-  out.
-- **Whole files are held in memory.** Fine to a few million rows on a normal
-  machine; beyond that, register Parquet on disk with DuckDB instead.
-- **Conversation memory is a rolling window** of recent turns plus truncated
-  assistant replies, not a summarising memory. Very long sessions lose early
-  context.
-- **The answer cache is per process** and cleared on restart.
-- **The country join is partial by design** (33 of 42 names match). See
-  `data/README.md`.
+---
+
+## Data Flow — CSV Upload
+
+```
+User drops file(s) onto uploader
+        │
+        ▼
+  session.add_csv_bytes(raw_bytes, filename)
+        │
+        ├─ ingest.py: detect encoding → parse CSV/TSV
+        ├─ ingest.py: infer column types (numeric, date, categorical, ID)
+        ├─ DuckDB: COPY into in-process table
+        ├─ profile.py: compute null %, distinct count, sample values, role
+        ├─ profile.py: calculate quality score (completeness + uniqueness)
+        └─ engine.py: detect join hints across all loaded tables
+                    │
+                    ▼
+              Dataset registered → UI switches to workspace tabs
+```
+
+---
+
+## Module Map
+
+| Module | Responsibility |
+|---|---|
+| `core/engine.py` | `DataSession` — owns DuckDB connection, dataset registry, history |
+| `core/agent.py` | LLM plan → act → observe loop with streaming |
+| `core/ingest.py` | CSV parsing, type inference, encoding detection |
+| `core/profile.py` | Column profiling, quality scoring, issue detection |
+| `core/guard.py` | SQL AST validation — blocks all write/DDL statements |
+| `core/tools/` | `run_sql`, `run_pandas`, `create_chart`, `detect_anomaly`, `forecast` |
+| `core/anomaly.py` | IQR, Z-score, Isolation Forest anomaly detection |
+| `core/charts.py` | `ChartSpec` → validated Plotly figure builder |
+| `core/dashboard.py` | Deterministic KPI + panel generation from column roles |
+| `core/insights.py` | Statistical fact extraction + LLM-narrated summary |
+| `core/forecast.py` | Exponential Smoothing / ARIMA time-series forecasting |
+| `core/semantic.py` | Schema context builder, question suggestions |
+| `core/cache.py` | In-memory LRU answer cache keyed by schema + question |
+| `core/reports.py` | PDF, Excel, Markdown, HTML report generation |
+| `core/observability.py` | Structured logging, per-turn `Trace` with step timings |
+| `core/llm/` | LLM client with provider fallback chain |
+| `core/prompts.py` | System and user prompt templates |
+| `api/main.py` | FastAPI REST transport layer |
+| `ui/app.py` | Streamlit UI — all tabs and rendering logic |
+| `ui/theme.py` | Plotly chart theming + SVG icon system |
+
+---
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| UI Framework | Streamlit 1.x |
+| REST API | FastAPI + Uvicorn |
+| In-process analytics | DuckDB (SQL) + Pandas + NumPy |
+| ML / Statistics | scikit-learn (Isolation Forest), statsmodels (ARIMA), scipy |
+| Charting | Plotly |
+| LLM | Google Gemini / Groq / OpenAI (pluggable, fallback chain) |
+| Data validation | Pydantic v2 |
+| Containerisation | Docker (multi-stage) + Docker Compose |
+| Testing | pytest (262 test functions, 12 test files) |
+| Evaluation | Custom golden-set eval framework in `evals/` |
+
+---
+
+## Security Model
+
+- **Read-only SQL:** every statement is parsed into an AST by the Guard before DuckDB runs it. `DROP`, `UPDATE`, `INSERT`, `DELETE`, `ATTACH`, `COPY TO` and any file-system access are blocked at the AST level — not by string matching.
+- **Restricted Pandas:** the pandas executor uses `compile()` + `exec()` with a locked global scope — no imports, no loops, no attribute access to filesystem objects.
+- **Non-root container:** the Docker image runs as user `analyst` (uid 10001).
+- **Row caps:** all queries are capped at configurable row limits to prevent memory exhaustion.

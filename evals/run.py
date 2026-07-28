@@ -111,9 +111,9 @@ def run_case(case: EvalCase, truths: dict, *, verbose: bool) -> CaseOutcome:
     print(f"  [{icon}] {case.id:<28} {outcome.duration_s:>6.1f}s  {outcome.tokens_in + outcome.tokens_out:>6,} tok")
     for result in results:
         if not result.passed:
-            print(f"        {RED}✗{RESET} {result.name} — {result.detail}")
+            print(f"        {RED}fail{RESET}  {result.name} — {result.detail}")
         elif verbose:
-            print(f"        {GREEN}✓{RESET} {result.name}")
+            print(f"        {GREEN}pass{RESET}  {result.name}")
     if verbose and outcome.answer:
         print(f"{DIM}        answer: {outcome.answer[:220]}{RESET}")
     return outcome

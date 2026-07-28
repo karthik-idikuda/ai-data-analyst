@@ -215,7 +215,7 @@ def test_quality_endpoint(loaded_session: str) -> None:
 def test_report_export_in_all_formats(loaded_session: str) -> None:
     markdown = client.get(f"/sessions/{loaded_session}/report?format=markdown")
     assert markdown.status_code == 200
-    assert "AI Data Analyst" in markdown.text
+    assert "AI-powered Data Analyst" in markdown.text
     assert "online_retail_ii_international" in markdown.text
 
     html = client.get(f"/sessions/{loaded_session}/report?format=html")

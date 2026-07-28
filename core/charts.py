@@ -22,10 +22,11 @@ import plotly.graph_objects as go
 from .errors import ToolError
 from .models import ChartSpec, ChartType, ColumnRole, DatasetProfile, QueryResult
 
-PALETTE = [
-    "#2563eb", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6",
-    "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
-]
+# No palette or template is set here on purpose. `core` has no opinion about
+# presentation: it returns a figure with correct geometry, and the client themes it
+# (see ui/theme.py::style_figure). Baking a light-theme palette in here meant the
+# per-trace colours won by specificity over the layout colorway, so the dark theme
+# could not restyle its own charts.
 
 
 def _resolve_column(name: str, columns: list[str], *, field: str) -> str:
@@ -55,6 +56,8 @@ def validate_spec(spec: ChartSpec, columns: list[str]) -> ChartSpec:
         resolved.y = _resolve_column(spec.y, columns, field="y")
     if spec.series:
         resolved.series = _resolve_column(spec.series, columns, field="series")
+    if spec.animate_by:
+        resolved.animate_by = _resolve_column(spec.animate_by, columns, field="animate_by")
 
     needs_y = {
         ChartType.BAR, ChartType.HORIZONTAL_BAR, ChartType.LINE, ChartType.AREA,
@@ -122,7 +125,18 @@ def _prepare(frame: pd.DataFrame, spec: ChartSpec) -> pd.DataFrame:
         if column in work.columns:
             work = work.sort_values(column, ascending=ascending, kind="mergesort")
     if spec.limit:
-        work = work.head(spec.limit)
+        # For an animated chart the limit is per frame (e.g. top 10 each year),
+        # not a global head() that would drop entire later frames.
+        if spec.animate_by and spec.animate_by in work.columns:
+            work = (
+                work.groupby(spec.animate_by, group_keys=False)
+                .apply(lambda g: g.head(spec.limit))
+            )
+        else:
+            work = work.head(spec.limit)
+    # Frames must play in order, so sort by the animation column last.
+    if spec.animate_by and spec.animate_by in work.columns:
+        work = work.sort_values(spec.animate_by, kind="mergesort")
     return work
 
 
@@ -137,14 +151,26 @@ def build_figure(spec: ChartSpec, frame: pd.DataFrame) -> go.Figure:
     if spec.y and spec.y_label:
         labels[spec.y] = spec.y_label
 
-    common: dict[str, Any] = {
-        "title": spec.title,
-        "labels": labels,
-        "color_discrete_sequence": PALETTE,
-    }
+    common: dict[str, Any] = {"title": spec.title, "labels": labels}
+
+    # Animation is only meaningful for the types Plotly Express can frame, and
+    # only when the frame column is genuinely present in the query result.
+    animate = None
+    if spec.animate_by and spec.animate_by in work.columns and spec.type in (
+        ChartType.BAR, ChartType.HORIZONTAL_BAR, ChartType.LINE,
+        ChartType.AREA, ChartType.SCATTER,
+    ):
+        animate = spec.animate_by
 
     if spec.type in (ChartType.BAR, ChartType.HORIZONTAL_BAR):
         horizontal = spec.type == ChartType.HORIZONTAL_BAR
+        bar_kwargs: dict[str, Any] = {}
+        if animate:
+            bar_kwargs["animation_frame"] = animate
+            if spec.y and spec.y in work.columns:
+                # Lock the value axis across frames so bars don't rescale each step.
+                vmax = float(work[spec.y].max()) * 1.05
+                bar_kwargs["range_x" if horizontal else "range_y"] = [0, vmax]
         fig = px.bar(
             work,
             x=spec.y if horizontal else spec.x,
@@ -152,34 +178,49 @@ def build_figure(spec: ChartSpec, frame: pd.DataFrame) -> go.Figure:
             color=spec.series,
             orientation="h" if horizontal else "v",
             barmode="stack" if spec.stacked else "group",
+            **bar_kwargs,
             **common,
         )
         if horizontal:
             fig.update_yaxes(autorange="reversed")
     elif spec.type == ChartType.LINE:
-        fig = px.line(work, x=spec.x, y=spec.y, color=spec.series, markers=True, **common)
+        line_kwargs = {"animation_frame": animate} if animate else {}
+        fig = px.line(work, x=spec.x, y=spec.y, color=spec.series, markers=True, **line_kwargs, **common)
     elif spec.type == ChartType.AREA:
-        fig = px.area(work, x=spec.x, y=spec.y, color=spec.series, **common)
+        area_kwargs = {"animation_frame": animate} if animate else {}
+        fig = px.area(work, x=spec.x, y=spec.y, color=spec.series, **area_kwargs, **common)
     elif spec.type == ChartType.PIE:
         fig = px.pie(work, names=spec.x, values=spec.y, hole=0.35, **common)
     elif spec.type == ChartType.SCATTER:
-        fig = px.scatter(work, x=spec.x, y=spec.y, color=spec.series, **common)
+        scatter_kwargs: dict[str, Any] = {}
+        if animate:
+            scatter_kwargs["animation_frame"] = animate
+            if spec.y and spec.y in work.columns:
+                pad_y = (float(work[spec.y].max()) - float(work[spec.y].min())) * 0.05 or 1.0
+                scatter_kwargs["range_y"] = [float(work[spec.y].min()) - pad_y, float(work[spec.y].max()) + pad_y]
+        fig = px.scatter(work, x=spec.x, y=spec.y, color=spec.series, **scatter_kwargs, **common)
     elif spec.type == ChartType.HISTOGRAM:
         fig = px.histogram(work, x=spec.x, color=spec.series, **common)
     elif spec.type == ChartType.BOX:
         fig = px.box(work, x=spec.series or spec.x, y=spec.y or spec.x, **common)
     elif spec.type == ChartType.HEATMAP:
         pivot = work.pivot_table(index=spec.y, columns=spec.x, values=spec.series, aggfunc="mean")
-        fig = px.imshow(pivot, title=spec.title, aspect="auto", color_continuous_scale="Blues")
+        fig = px.imshow(pivot, title=spec.title, aspect="auto", color_continuous_scale="Greys")
     else:  # pragma: no cover - ChartType is exhaustive
         raise ToolError(f"Unsupported chart type '{spec.type}'.")
 
+    if animate:
+        # Speed up the default (slow) frame transitions for a livelier playback.
+        for button in fig.layout.updatemenus or []:
+            for step in button.buttons or []:
+                if step.args and isinstance(step.args[-1], dict):
+                    step.args[-1].setdefault("frame", {})["duration"] = 700
+                    step.args[-1].setdefault("transition", {})["duration"] = 300
+
     fig.update_layout(
-        template="plotly_white",
         margin=dict(l=50, r=30, t=60, b=50),
-        title_font_size=16,
         legend_title_text=spec.series or "",
-        height=430,
+        height=400,
     )
     return fig
 

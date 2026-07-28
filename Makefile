@@ -39,6 +39,11 @@ eval: ## Run the LLM evaluation harness (needs an API key)
 api-smoke: ## End-to-end API check against the real datasets (no API key needed)
 	$(PY) scripts/api_smoke.py
 
+check-icons: ## Fail if any emoji or icon characters crept into source or docs
+	$(PY) scripts/check_no_icons.py
+
+verify: test api-smoke check-icons ## Everything: tests, end-to-end smoke, icon check
+
 eval-offline: ## Run the pandas-vs-DuckDB cross-check (no API key needed)
 	$(PY) -m pytest tests/test_evals.py -q -p no:warnings
 

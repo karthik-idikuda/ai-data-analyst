@@ -129,16 +129,23 @@ def _create_chart(session: "DataSession", args: dict[str, Any]) -> ToolOutcome:
         )
     ]
     preview = result.to_markdown(limit=min(MAX_MODEL_ROWS, 20))
+    animated = " animated" if spec.animate_by else ""
+    frame_note = (
+        f" It plays through '{spec.animate_by}' as frames the user can press play on."
+        if spec.animate_by
+        else ""
+    )
     return ToolOutcome(
         model_text=(
-            f"Rendered a {spec.type.value} chart titled '{spec.title}' "
-            f"(x={spec.x}, y={spec.y}) from {result.row_count} row(s). "
-            "The user can see it; describe what it shows rather than repeating every value.\n"
+            f"Rendered a{animated} {spec.type.value} chart titled '{spec.title}' "
+            f"(x={spec.x}, y={spec.y}) from {result.row_count} row(s).{frame_note} "
+            "The user can see it; describe what it shows rather than repeating every value. "
+            "Do NOT claim you cannot make an animated chart — this tool just did.\n"
             f"Underlying data:\n{preview}"
         ),
         artifacts=artifacts,
         sql=[result.sql],
-        reasoning=f"Charted {spec.y or spec.x} by {spec.x} as a {spec.type.value}.",
+        reasoning=f"Charted {spec.y or spec.x} by {spec.x} as a{animated} {spec.type.value}.",
     )
 
 
@@ -147,7 +154,12 @@ CREATE_CHART = Tool(
     description=(
         "Run a SELECT and render its result as a chart. Use whenever a comparison, trend, "
         "distribution or share would be clearer visually. Aggregate in the SQL first — do not "
-        "chart thousands of raw rows."
+        "chart thousands of raw rows. "
+        "For an ANIMATED chart (the user asks for animation, a chart that plays over time, a "
+        "bar-chart race, or change year by year), set `animate_by` to the column to animate "
+        "over — usually a year or period — and make the SQL return one row per "
+        "(animate_by, category) combination. Animation works on bar, horizontal_bar, line, "
+        "area and scatter."
     ),
     parameters=object_schema(
         {
@@ -171,8 +183,12 @@ CREATE_CHART = Tool(
                         "Row ordering before plotting.",
                         enum=["none", "x_asc", "x_desc", "y_asc", "y_desc"],
                     ),
-                    "limit": {"type": "integer", "description": "Keep only the first N rows after sorting.", "minimum": 1, "maximum": 200},
+                    "limit": {"type": "integer", "description": "Keep only the first N rows after sorting (per frame when animated).", "minimum": 1, "maximum": 200},
                     "stacked": {"type": "boolean", "description": "Stack bars instead of grouping them."},
+                    "animate_by": string_param(
+                        "Column to animate the chart over, e.g. 'year'. The chart plays through "
+                        "each distinct value as a frame. Omit for a static chart."
+                    ),
                 },
                 "required": ["type", "x"],
             },

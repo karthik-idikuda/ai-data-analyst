@@ -1,0 +1,13 @@
+[theme]
+base = "dark"
+primaryColor = "#2F5DFF"
+
+[server]
+maxUploadSize = 2000
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true

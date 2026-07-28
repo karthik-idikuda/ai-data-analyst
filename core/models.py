@@ -163,6 +163,11 @@ class ChartSpec(BaseModel):
     sort: Literal["none", "x_asc", "x_desc", "y_asc", "y_desc"] = "none"
     limit: int | None = Field(default=None, ge=1, le=200)
     stacked: bool = False
+    # Animation: when `animate_by` names a column (e.g. year), the chart plays
+    # through that column's values as frames — a real Plotly animation driven by
+    # the query result, not a canned effect. Supported on bar, horizontal_bar,
+    # line, area and scatter.
+    animate_by: str | None = None
 
     @field_validator("title")
     @classmethod

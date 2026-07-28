@@ -93,6 +93,138 @@ def test_arrow_honours_the_system_pool_setting() -> None:
     assert pa.system_memory_pool().backend_name == "system"
 
 
+def test_ui_contains_no_emoji_or_icon_characters() -> None:
+    """The interface carries meaning with type and spacing, not pictograms.
+
+    Emoji render inconsistently across platforms and fonts, and they date an
+    interface fast. This asserts the rule rather than trusting it to hold.
+    """
+    import unicodedata
+
+    offenders: list[str] = []
+    for path in (UI_APP, UI_APP.parent / "theme.py", UI_APP.parent / "app_helpers.py"):
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            for char in line:
+                code = ord(char)
+                pictographic = (
+                    0x1F300 <= code <= 0x1FAFF   # emoji, pictographs, symbols
+                    or 0x2600 <= code <= 0x27BF  # misc symbols, dingbats
+                    or 0xFE0F == code            # variation selector-16
+                    or 0x2B00 <= code <= 0x2BFF  # arrows/geometric extras
+                )
+                if pictographic:
+                    name = unicodedata.name(char, f"U+{code:04X}")
+                    offenders.append(f"{path.name}:{lineno} {name}")
+    assert not offenders, "found pictographic characters in the UI: " + "; ".join(offenders[:10])
+
+
+def test_theme_defines_a_single_accent_colour() -> None:
+    """A restrained palette is the design constraint; verify it did not sprawl."""
+    from ui import theme
+
+    assert theme.ACCENT.startswith("#") and len(theme.ACCENT) == 7
+    assert theme.SERIES[0] == theme.ACCENT, "the first chart series should be the accent"
+    assert len(set(theme.SERIES)) == len(theme.SERIES), "duplicate series colours"
+
+
+def test_charts_module_sets_no_presentation_palette() -> None:
+    """Regression: a light-theme palette baked into core/charts.py set per-trace
+    colours, which beat the layout colorway and made the dark theme unable to
+    restyle its own charts."""
+    source = (Path(__file__).resolve().parent.parent / "core" / "charts.py").read_text()
+    assert "color_discrete_sequence" not in source
+    assert "plotly_white" not in source
+
+
+def test_streamlit_theme_config_is_consistent() -> None:
+    config = (Path(__file__).resolve().parent.parent / ".streamlit" / "config.toml").read_text()
+    assert 'base = "light"' in config or 'base = "dark"' in config
+    assert "maxUploadSize = 200" in config
+    # Disabling CORS while XSRF protection is on is a contradictory pair that makes
+    # Streamlit print a warning block on every boot.
+    assert not (
+        "enableCORS = false" in config and "enableXsrfProtection = true" in config
+    ), "enableCORS=false with enableXsrfProtection=true triggers a startup warning"
+
+
+# --------------------------------------------------------------------------- #
+# The app script actually runs
+# --------------------------------------------------------------------------- #
+def test_app_script_executes_without_error() -> None:
+    """Run ui/app.py headlessly through Streamlit's own test harness.
+
+    This catches what static checks cannot: import errors, bad f-strings in the CSS,
+    a renderer referencing a field that no longer exists, or an exception on the
+    empty state. `file_uploader` cannot be driven by AppTest, so this covers the
+    no-data path; the loaded-data paths are covered by the artifact tests below and
+    by scripts/api_smoke.py.
+    """
+    from streamlit.testing.v1 import AppTest
+
+    app = AppTest.from_file(str(UI_APP), default_timeout=90)
+    app.run()
+
+    assert not app.exception, f"app raised: {[str(e) for e in app.exception]}"
+    # The empty state must explain how to start and must not show a fake dataset.
+    body = " ".join(m.value for m in app.markdown) + " " + " ".join(c.value for c in app.caption)
+    assert "AI-powered Data Analyst" in body
+    assert "Your intelligent companion for data exploration" in body
+    assert "online_retail_ii_international.csv" in body or "built-in sample data" in body
+    assert any(button.label == "Load sample workspace" for button in app.button)
+
+
+def test_loaded_workspace_executes_without_error() -> None:
+    """Exercise the redesigned loaded-data surface through Streamlit's AppTest.
+
+    This is intentionally Streamlit-native rather than browser automation. It
+    seeds a real DataSession, runs the complete script, and verifies all five
+    primary workspaces render while the deterministic overview builds.
+    """
+    from streamlit.testing.v1 import AppTest
+
+    session = DataSession()
+    session.add_csv_bytes(
+        b"date,region,revenue\n2025-01-01,North,120\n2025-02-01,South,95\n"
+        b"2025-03-01,North,145\n2025-04-01,West,110\n",
+        "sales.csv",
+    )
+    app = AppTest.from_file(str(UI_APP), default_timeout=90)
+    app.session_state["data_session"] = session
+    app.session_state["loaded_keys"] = set()
+    app.session_state["upload_errors"] = []
+    app.session_state["pending_question"] = None
+    app.session_state["uploader_version"] = 0
+
+    try:
+        app.run()
+        assert not app.exception, f"loaded app raised: {[str(e) for e in app.exception]}"
+        nav_radio = next(r for r in app.radio if r.key == "nav_section")
+        assert list(nav_radio.options) == [
+            "Overview",
+            "Chat",
+            "Insights",
+            "Quality",
+            "Explore",
+            "Export",
+        ]
+        metric_labels = {metric.label for metric in app.metric}
+        assert {"Datasets", "Rows available", "Average quality", "Relationships"} <= metric_labels
+
+        # Switch the sidebar nav to Overview and confirm that workspace renders.
+        nav_radio.set_value("Overview").run()
+        assert not app.exception, f"overview raised: {[str(e) for e in app.exception]}"
+        body = " ".join(m.value for m in app.markdown)
+        assert "Executive overview" in body
+    finally:
+        session.close()
+
+
+def test_app_script_has_no_stray_debug_output() -> None:
+    source = UI_APP.read_text()
+    for pattern in ("st.write(st.session_state", "print(", "st.balloons", "st.snow"):
+        assert pattern not in source, f"leftover debug/decoration call: {pattern}"
+
+
 def test_anomaly_detectors_pin_their_thread_pools() -> None:
     """Two OpenMP runtimes in one process is undefined behaviour."""
     source = (Path(__file__).resolve().parent.parent / "core" / "anomaly.py").read_text()

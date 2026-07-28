@@ -99,7 +99,7 @@ def _artifact_md(artifact: Artifact) -> str:
     return f"**{artifact.title}**\n\n```json\n{json.dumps(payload, indent=2, default=str)[:2000]}\n```"
 
 
-def to_markdown(session: DataSession, *, title: str = "AI Data Analyst — Session Report") -> str:
+def to_markdown(session: DataSession, *, title: str = "AI-powered Data Analyst — Session Report") -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     parts = [f"# {title}", f"_Generated {now} · session `{session.session_id}`_", "", "## Datasets", ""]
 
@@ -161,7 +161,7 @@ def to_markdown(session: DataSession, *, title: str = "AI Data Analyst — Sessi
     return "\n".join(parts)
 
 
-def to_pdf(session: DataSession, *, title: str = "AI Data Analyst — Session Report") -> bytes:
+def to_pdf(session: DataSession, *, title: str = "AI-powered Data Analyst — Session Report") -> bytes:
     """Render the session as a paginated PDF.
 
     Built with ReportLab's Platypus flowables rather than a headless browser, so the
@@ -189,7 +189,7 @@ def to_pdf(session: DataSession, *, title: str = "AI Data Analyst — Session Re
         buffer,
         pagesize=A4,
         title=title,
-        author="AI Data Analyst",
+        author="AI-powered Data Analyst",
         leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm,
     )
 
@@ -508,7 +508,7 @@ def to_excel(session: DataSession) -> bytes:
     return buffer.getvalue()
 
 
-def to_html(session: DataSession, *, title: str = "AI Data Analyst — Session Report") -> str:
+def to_html(session: DataSession, *, title: str = "AI-powered Data Analyst — Session Report") -> str:
     """Self-contained HTML. The Markdown body is escaped, not rendered, so the
     export has zero dependencies and cannot inject anything into a browser."""
     return _HTML_TEMPLATE.format(

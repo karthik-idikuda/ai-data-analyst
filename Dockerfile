@@ -53,7 +53,8 @@ COPY --chown=analyst:analyst evals/ ./evals/
 COPY --chown=analyst:analyst scripts/ ./scripts/
 COPY --chown=analyst:analyst tests/ ./tests/
 COPY --chown=analyst:analyst data/ ./data/
-COPY --chown=analyst:analyst requirements.txt .env.example ./
+COPY --chown=analyst:analyst .streamlit/ ./.streamlit/
+COPY --chown=analyst:analyst requirements.txt pytest.ini .env.example ./
 
 USER analyst
 

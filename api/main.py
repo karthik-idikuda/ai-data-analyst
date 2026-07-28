@@ -38,7 +38,7 @@ log = get_logger("api")
 settings = get_settings()
 
 app = FastAPI(
-    title="AI Data Analyst",
+    title="AI-powered Data Analyst",
     version=__version__,
     description=(
         "Upload CSV files and query them in natural language. The LLM proposes SQL; "

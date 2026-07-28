@@ -33,11 +33,92 @@ from .errors import AnalystError, DatasetNotFoundError, LLMNotConfiguredError, T
 from .llm import LLMProvider, Message, get_provider
 from .models import AgentAnswer, Artifact, ChatMessage
 from .observability import Trace, get_logger
+from .prompts import SMALLTALK_SYSTEM as _SMALLTALK_SYSTEM
 from .prompts import analyst_system
 from .semantic import build_schema_context, schema_fingerprint
 from .tools import REGISTRY, tool_specs
 
 log = get_logger(__name__)
+
+_ANOMALY_INTENT_RE = re.compile(
+    r"\b(?:anomal(?:y|ies|ous)|outlier(?:s)?|unusual|abnormal|spike(?:s)?|"
+    r"suspicious|irregularit(?:y|ies)|deviation(?:s)?)\b",
+    re.IGNORECASE,
+)
+_ANOMALY_NEGATION_RE = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|without|avoid|skip)\s+"
+    r"(?:\w+\s+){0,3}"
+    r"(?:anomal(?:y|ies|ous)|outlier(?:s)?|unusual|abnormal|spike(?:s)?|"
+    r"suspicious|irregularit(?:y|ies)|deviation(?:s)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _anomaly_requested(question: str) -> bool:
+    """Return whether this turn explicitly asks for anomaly analysis.
+
+    The assignment requires anomaly detection only when the user flags it. The
+    tool is therefore hidden and runtime-blocked on ordinary analysis turns;
+    this lightweight classifier is intentionally conservative.
+    """
+    without_negated_requests = _ANOMALY_NEGATION_RE.sub("", question)
+    return bool(_ANOMALY_INTENT_RE.search(without_negated_requests))
+
+
+# Small-talk detection is deliberately a closed vocabulary, not a prompt
+# instruction. Telling the model "don't use a tool for a greeting" is not
+# reliable on its own — in practice a model told that will still reach for a
+# *different* tool (inspect_schema, search_columns) instead of none at all.
+# The only guarantee that "hi" cannot trigger a chart or a schema dump is to
+# never declare any tools on that turn, which this classifier gates.
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hiiii", "hey", "heyy", "heyyy", "hello", "helloo",
+    "yo", "sup", "hola", "howdy", "greetings", "morning", "evening",
+    "afternoon",
+}
+_THANKS_WORDS = {"thanks", "thank", "thx", "ty", "cheers", "appreciate", "appreciated"}
+_BYE_WORDS = {"bye", "goodbye", "cya", "later", "farewell"}
+_ACK_WORDS = {
+    "ok", "okay", "k", "kk", "cool", "nice", "great", "awesome", "perfect",
+    "sounds", "good", "alright", "fine", "yep", "yes", "no", "nope",
+}
+_FILLER_WORDS = {
+    "there", "again", "guys", "team", "bro", "buddy", "dude", "you", "u",
+    "so", "much", "very", "a", "lot", "for", "your", "help", "time", "day",
+    "is", "it", "how", "going", "whats", "what's", "up", "doing", "im",
+    "i'm", "good", "well",
+}
+_SMALLTALK_VOCAB = _GREETING_WORDS | _THANKS_WORDS | _BYE_WORDS | _ACK_WORDS | _FILLER_WORDS
+_SMALLTALK_CORE = _GREETING_WORDS | _THANKS_WORDS | _BYE_WORDS | _ACK_WORDS
+
+_HELP_PHRASES = (
+    "what can you do", "what do you do", "who are you", "what are you",
+    "how does this work", "how do you work", "help",
+)
+_WORD_RE = re.compile(r"[a-z']+")
+
+
+def _is_small_talk(question: str) -> bool:
+    """A closed-vocabulary check for greetings, thanks, and "what can you do?".
+
+    Deliberately conservative: every token in the message must be a known
+    small-talk word (greeting/thanks/bye/acknowledgement/filler), at least one
+    must be a real small-talk word rather than pure filler, and the message
+    must be short. Anything containing a real request — a column name, a
+    metric, "revenue", "chart" — falls through this check and reaches the
+    normal tool-enabled path.
+    """
+    text = question.strip().lower()
+    stripped = re.sub(r"[!?.,]+", "", text).strip()
+    if any(stripped == phrase or stripped.startswith(phrase) for phrase in _HELP_PHRASES):
+        return True
+
+    tokens = _WORD_RE.findall(text)
+    if not tokens or len(tokens) > 6:
+        return False
+    if not all(t in _SMALLTALK_VOCAB for t in tokens):
+        return False
+    return any(t in _SMALLTALK_CORE for t in tokens)
 
 
 @dataclass
@@ -132,7 +213,40 @@ class Agent:
         system = analyst_system(build_schema_context(session))
         messages = self._seed_messages(history, question)
         state = _TurnState(artifacts=[], reasoning=[], sql=[])
-        specs = tool_specs()
+
+        if _is_small_talk(question):
+            # No tools are declared at all on this turn. Prompting the model not
+            # to use a tool for a greeting is not reliable — it will happily
+            # reach for a different tool (inspect_schema, search_columns)
+            # instead of none. Omitting the tool declarations entirely is the
+            # only way to guarantee "hi" cannot produce a chart or a schema dump.
+            with trace.step("llm", "completion.smalltalk", messages=len(messages)) as tstep:
+                response = self.provider.chat(messages, system=_SMALLTALK_SYSTEM, tools=None)
+                tstep.tokens_in = response.tokens_in
+                tstep.tokens_out = response.tokens_out
+            yield {"type": "step", "step": trace.steps[-1].to_dict()}
+            answer_text = (response.text or "").strip() or (
+                "Hi! Ask me anything about the data you have loaded."
+            )
+            answer = AgentAnswer(
+                answer_markdown=answer_text,
+                reasoning=[],
+                artifacts=[],
+                sql_executed=[],
+                trace=trace.to_dict(),
+                cache_hit=False,
+            )
+            if record_history:
+                self._record(session, question, answer)
+            yield {"type": "answer", "answer": answer}
+            return
+
+        anomaly_requested = _anomaly_requested(question)
+        specs = [
+            spec
+            for spec in tool_specs()
+            if anomaly_requested or spec.name != "detect_anomalies"
+        ]
         seen_calls: set[str] = set()
         answer_text = ""
 
@@ -175,6 +289,28 @@ class Agent:
                     )
                     continue
                 seen_calls.add(signature)
+
+                if call.name == "detect_anomalies" and not anomaly_requested:
+                    policy_message = (
+                        "POLICY: Anomaly detection was not run because the current user request "
+                        "did not explicitly ask for anomalies, outliers, spikes, unusual values, "
+                        "or suspicious data. Continue with ordinary analysis tools."
+                    )
+                    with trace.step(
+                        "policy", "tool.detect_anomalies", arguments=_trim(call.arguments)
+                    ) as tstep:
+                        tstep.ok = False
+                        tstep.error = "anomaly analysis not requested"
+                    yield {"type": "step", "step": trace.steps[-1].to_dict()}
+                    messages.append(
+                        Message(
+                            role="tool",
+                            tool_call_id=call.id,
+                            tool_name=call.name,
+                            content=policy_message,
+                        )
+                    )
+                    continue
 
                 yield {"type": "status", "message": f"Running {call.name}…"}
                 content = self._execute_tool(session, call.name, call.arguments, state, trace)

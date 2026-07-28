@@ -163,11 +163,33 @@ def build(session: DataSession, table: str | None = None) -> Dashboard:
             log.info("dashboard.kpi_failed", error=str(exc)[:200])
             dashboard.notes.append(f"Could not compute totals for {label}.")
 
+    def _exact_distinct(column: str) -> int | None:
+        """Count distinct values over every row.
+
+        ``ColumnProfile.distinct_count`` is computed on a sample for large tables
+        (see ``settings.profile_sample_rows``), so using it for a headline KPI
+        under-reports cardinality — on the real retail file it showed 524 customers
+        instead of 533. Every other KPI here is a real aggregate, so this one is too.
+        """
+        try:
+            frame = session.run_dataframe_query(
+                f"SELECT COUNT(DISTINCT {column}) AS n FROM {target}", max_rows=1
+            )
+            if not frame.empty and frame.at[0, "n"] is not None:
+                return int(frame.at[0, "n"])
+        except Exception as exc:  # noqa: BLE001 - a missing KPI must not fail the dashboard
+            log.info("dashboard.distinct_failed", column=column, error=str(exc)[:200])
+        return None
+
     if dimensions:
         first = profile.column(dimensions[0])
         if first:
+            exact = _exact_distinct(first.name)
             dashboard.kpis.append(
-                Kpi(f"Distinct {dimensions[0]}", _fmt(first.distinct_count))
+                Kpi(
+                    f"Distinct {dimensions[0]}",
+                    _fmt(exact if exact is not None else first.distinct_count),
+                )
             )
     if temporal:
         span = temporal[0]
@@ -179,7 +201,13 @@ def build(session: DataSession, table: str | None = None) -> Dashboard:
     identifiers = profile.columns_by_role(ColumnRole.IDENTIFIER)
     if identifiers:
         ident = identifiers[-1]
-        dashboard.kpis.append(Kpi(f"Distinct {ident.name}", _fmt(ident.distinct_count)))
+        exact_ident = _exact_distinct(ident.name)
+        dashboard.kpis.append(
+            Kpi(
+                f"Distinct {ident.name}",
+                _fmt(exact_ident if exact_ident is not None else ident.distinct_count),
+            )
+        )
 
     # -------------------------------------------------------------- panels
     def add_panel(title: str, sql: str, spec: ChartSpec, note: str = "") -> None:
