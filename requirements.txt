@@ -20,12 +20,12 @@ reportlab==4.2.5
 # ---- api ----
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-python-multipart==0.0.30
+python-multipart==0.0.31
 
 # ---- ui ----
-streamlit==1.54.0
+streamlit==1.60.0
 plotly==5.24.1
 
 # ---- tests ----
-pytest==9.0.3
+pytest==9.1.1
 pytest-cov==6.0.0
