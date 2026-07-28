@@ -46,6 +46,7 @@ production-ready AI application, not a thin wrapper around an LLM API.*
 - [Why this exists](#why-this-exists)
 - [Quick start](#quick-start)
 - [Run it with Docker](#run-it-with-docker)
+- [Deploy to Streamlit Cloud](#deploy-to-streamlit-community-cloud)
 - [Step-by-step walkthrough](#step-by-step-walkthrough)
 
 </td>
@@ -128,6 +129,41 @@ docker compose up -d
 Both services share one 1.65 GB image, run as a non-root user (`analyst`, uid
 `10001`), and each expose their own healthcheck. Bring it down with
 `docker compose down`.
+
+<br/>
+
+## Deploy to Streamlit Community Cloud
+
+The UI has no local filesystem writes and reads its two sample datasets by a
+relative path, so it deploys as-is with no code changes.
+
+1. Push this repository to GitHub (already done if you're reading this there).
+2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with
+   GitHub.
+3. Click **New app**, pick this repository and the `main` branch, and set the
+   main file path to `ui/app.py`.
+4. Open **Advanced settings** before deploying:
+   - **Python version** — pick `3.11` explicitly. Community Cloud does not read
+     a `runtime.txt`/`.python-version` file for this; it only respects the
+     dropdown in the deploy dialog (or the app's **Settings -> General** after
+     it exists).
+   - **Secrets** — paste the contents of your `.env` in TOML form, at minimum:
+     ```toml
+     LLM_PROVIDER = "gemini"
+     LLM_API_KEY = "your-key-here"
+     LLM_MODEL = "gemini-3.6-flash"
+     LLM_FALLBACK_MODELS = "gemini-3.6-flash,gemini-3-flash-preview,gemini-3.1-flash-lite,gemini-2.5-flash"
+     ```
+     Never commit these values — this is exactly what Secrets is for.
+5. Click **Deploy**. The free tier runs on a small, shared container (roughly
+   1 GB RAM), which is why `.streamlit/config.toml` caps uploads at 200 MB on
+   this deployment even though local/Docker runs can go higher via
+   `MAX_UPLOAD_MB` in `.env`.
+
+The FastAPI service (`api/main.py`) is not part of this deploy target — Community
+Cloud only runs one Streamlit entry point. Host the API separately (Render,
+Fly.io, a small VM, or the same Docker image from `docker-compose.yml`) if you
+need programmatic access alongside the UI.
 
 <br/>
 

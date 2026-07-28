@@ -3,7 +3,10 @@ base = "dark"
 primaryColor = "#2F5DFF"
 
 [server]
-maxUploadSize = 2000
+# Streamlit Community Cloud's free tier runs with ~1 GB RAM, so the upload cap
+# here is sized for that container rather than for a local/Docker deployment.
+# Local runs can still raise MAX_UPLOAD_MB in .env; this only bounds the widget.
+maxUploadSize = 200
 enableXsrfProtection = true
 
 [browser]
