@@ -1,31 +1,36 @@
 # ---- core engine ----
-pandas==2.2.3
-numpy==2.1.3
-duckdb==1.5.5
-sqlglot==25.34.0
-pydantic==2.10.4
-pydantic-settings==2.7.0
-python-dotenv==1.2.2
-structlog==24.4.0
-httpx==0.28.1
+# Lower bounds rather than hard pins on the compiled scientific stack.
+# Streamlit Community Cloud currently provisions Python 3.14, and a hard pin to
+# an older pandas/numpy has no matching 3.14 wheel, so the build falls back to
+# compiling from source and hangs. Ranges let the resolver take a wheel that
+# matches whichever interpreter the host provides.
+pandas>=2.2.3
+numpy>=2.1.3
+duckdb>=1.1.3
+sqlglot>=25.34.0
+pydantic>=2.10.4
+pydantic-settings>=2.7.0
+python-dotenv>=1.2.2
+structlog>=24.4.0
+httpx>=0.28.1
 
 # ---- analytics ----
-scikit-learn==1.7.2
-statsmodels==0.14.6
+scikit-learn>=1.6.0
+statsmodels>=0.14.4
 
 # ---- exports: Excel workbooks and PDF reports ----
-openpyxl==3.1.5
-reportlab==4.2.5
+openpyxl>=3.1.5
+reportlab>=4.2.5
 
 # ---- api ----
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.30
+fastapi>=0.115.6
+uvicorn[standard]>=0.34.0
+python-multipart>=0.0.30
 
 # ---- ui ----
-streamlit==1.54.0
-plotly==5.24.1
+streamlit>=1.41.1
+plotly>=5.24.1
 
 # ---- tests ----
-pytest==9.0.3
-pytest-cov==6.0.0
+pytest>=8.3.4
+pytest-cov>=6.0.0
