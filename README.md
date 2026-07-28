@@ -186,9 +186,20 @@ Markdown or HTML report of the whole session.
 
 ## Screenshots & demo
 
-A short screen recording of the full workflow is committed at
-**[`demo.mp4`](demo.mp4)** (upload → ask a question → animated chart → reasoning
-trace). A gallery of the live app:
+A short screen recording of the full workflow — upload, ask a question in plain
+English, an animated chart, and the reasoning trace:
+
+<div align="center">
+
+https://github.com/karthik-idikuda/ai-data-analyst/raw/main/demo.mp4
+
+<video src="https://github.com/karthik-idikuda/ai-data-analyst/raw/main/demo.mp4" controls width="80%"></video>
+
+<sub>If the player does not load, <a href="demo.mp4">click here to watch <code>demo.mp4</code></a>.</sub>
+
+</div>
+
+A gallery of the live app:
 
 <table>
 <tr>
