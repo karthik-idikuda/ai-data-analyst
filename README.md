@@ -61,7 +61,6 @@ production-ready AI application, not a thin wrapper around an LLM API.*
 <td valign="top" width="33%">
 
 **Trust it**
-- [Verification](#verification)
 - [Configuration](#configuration)
 - [API reference](#api-reference)
 - [Assumptions & notes](#assumptions--implementation-notes)
@@ -381,38 +380,6 @@ ai-data-analyst/
 
 Every stray cache directory, editor artefact and one-off script has been removed.
 What remains is exactly what runs the product, tests it, documents it, or ships it.
-
-<br/>
-
-## Verification
-
-```bash
-make test           # 339 passed, 1 skipped — no API key required
-make test-cov        # same, with a coverage report
-make api-smoke        # end-to-end HTTP check against the real datasets
-make verify             # tests + API smoke + interface policy check
-make eval-offline        # pandas vs DuckDB cross-check
-make eval                # full LLM evaluation harness (needs a key)
-```
-
-<div align="center">
-
-| Check | Result |
-|---|---|
-| Unit + integration tests | **339 passed · 1 skipped** |
-| SQL injection attempts rejected | **40 / 40** |
-| Pandas sandbox escapes refused | **21 / 21** |
-| Real-data API smoke test | **All checks passed** |
-| Icon/emoji policy | **0 violations** |
-
-</div>
-
-`evals/` runs a golden set of 13 questions against **independently computed**
-pandas ground truth — not against the same code path the app uses, because a
-ground truth produced by the system under test proves nothing. Three of the
-thirteen cases must be *refused* (no cost column exists, no marketing-spend
-column exists, no UK rows exist in the committed slice) — an eval suite of only
-answerable questions rewards a model for guessing.
 
 <br/>
 
